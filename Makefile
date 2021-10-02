@@ -13,6 +13,7 @@
 #   http://www.apache.org/licenses/LICENSE-2.0
 #
 
+#  ---=== 设置环境变量 ===---
 PROGNAME    = afl
 VERSION     = $(shell grep '^\#define VERSION ' config.h | cut -d '"' -f2)
 
@@ -32,6 +33,7 @@ CFLAGS     += -Wall -D_FORTIFY_SOURCE=2 -g -Wno-pointer-sign \
 	      -DAFL_PATH=\"$(HELPER_PATH)\" -DDOC_PATH=\"$(DOC_PATH)\" \
 	      -DBIN_PATH=\"$(BIN_PATH)\"
 
+#  ---=== 根据当前Linux 环境进行编译调整 ===---
 ifneq "$(filter Linux GNU%,$(shell uname))" ""
   LDFLAGS  += -ldl
 endif
@@ -44,6 +46,10 @@ endif
 
 COMM_HDR    = alloc-inl.h config.h debug.h types.h
 
+#  ---=== make 命令选择项目 ===---
+#  如果是make all ,那就调用到all: 这个地方开始,如果是make afl-gcc 就从afl-gcc 开始
+#  make all 这里包含afl-gcc afl-fuzz afl-showmap afl-tmin afl-gotcpu afl-analyze (注意看PROGS 环境变量中指定了内容)afl-as
+#  然后继续往下调用这些项目中指定的命令
 all: test_x86 $(PROGS) afl-as test_build all_done
 
 ifndef AFL_NO_X86
