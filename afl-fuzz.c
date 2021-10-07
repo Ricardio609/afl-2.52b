@@ -1218,7 +1218,11 @@ static inline void classify_counts(u32* mem) {
 /* Get rid of shared memory (atexit handler). */
 
 static void remove_shm(void) {
-
+  /*
+    参数1：shm_id是shmget()函数返回的共享内存标识符。
+    参数2：command是要采取的操作，IPC_RMID是删除共享内存段
+    参数3：buf是一个结构指针
+  */
   shmctl(shm_id, IPC_RMID, NULL);
 
 }
@@ -1363,18 +1367,29 @@ static void cull_queue(void) {
 EXP_ST void setup_shm(void) {
 
   u8* shm_str;
-
+  //将virgin_bits[MAP_SIZE]数组的每个元素置为255（0xff）
   if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);
 
   memset(virgin_tmout, 255, MAP_SIZE);
   memset(virgin_crash, 255, MAP_SIZE);
-
+  //调用shmget分配一块共享内存，将返回的共享内存标识符存到shm_id
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
-
+  /*
+    shmget参数
+    参数1：程序需要提供一个参数key（非0整数），它有效地为共享内存段命名，shmget()函数
+          成功时返回一个与key相关的共享内存标识符（非负整数），用于后续的共享内存函数。调用失败返回-1
+    
+    参数2：size以字节为单位指定需要共享的内存容量
+    参数3：权限标志。IPC_CREAT 如果共享内存不存在，则创建一个共享内存，否则打开操作。
+          IPC_EXCL 只有在共享内存不存在的时候，新的共享内存才建立，否则就产生错误。
+          421分别表示，读写执行3种权限。 比如，上面的6＝4＋2，表示读＋写。
+          0600 每一位表示一种类型的权限，比如，第一位是表示八进制,第二位表示拥有者的权限
+          为读写，第三位表示同组无权限，第四位表示他人无权限。
+  */
   if (shm_id < 0) PFATAL("shmget() failed");
-
+  /*注册atexit handler为remove_shm。在程序终止时调用remove_shm */
   atexit(remove_shm);
-
+  //创建一个字符串shm_str
   shm_str = alloc_printf("%d", shm_id);
 
   /* If somebody is asking us to fuzz instrumented binaries in dumb mode,
@@ -1385,9 +1400,19 @@ EXP_ST void setup_shm(void) {
   if (!dumb_mode) setenv(SHM_ENV_VAR, shm_str, 1);
 
   ck_free(shm_str);
-
+  /*
+    trac_bits是用做SHM with instrumentation bitmap
+    第一次创建完共享内存时，它还不能被任何进程访问，所以通过shmat来启动对该共享内存的访问，并把共享内存连接到当前进程的地址空间。
+  */
   trace_bits = shmat(shm_id, NULL, 0);
-  
+  /*
+    void *shmat(int shm_id, const void *shm_addr, int shm_flg)
+    参数1：shm_id是由shmget()函数返回的共享内存标识
+    参数2：shm_addr指定共享内存连接到当前进程中的位置，通常为空，表示让系统来选择共享内存的地址
+    参数3：shm_flg是一组标志位，通常为0
+    函数调用成功返回一个指向共享内存第一个字节的指针，如果调用失败返回 -1
+  */
+
   if (!trace_bits) PFATAL("shmat() failed");
 
 }
@@ -6800,7 +6825,7 @@ static void sync_fuzzers(char** argv) {
 static void handle_stop_sig(int sig) {
 
   stop_soon = 1; 
-
+  
   if (child_pid > 0) kill(child_pid, SIGKILL);
   if (forksrv_pid > 0) kill(forksrv_pid, SIGKILL);
 
@@ -7044,9 +7069,9 @@ static void check_if_tty(void) {
     not_on_tty = 1;
     return;
   }
-
+  //通过ioctl读取window size
   if (ioctl(1, TIOCGWINSZ, &ws)) {
-
+    //如果报错为ENOTTY，则表示当前不在一个tty终端执行，设置not_on_tty为1
     if (errno == ENOTTY) {
       OKF("Looks like we're not running on a tty, so I'll be a bit less verbose.");
       not_on_tty = 1;
@@ -7514,7 +7539,8 @@ static void handle_resize(int sig) {
 /* Check ASAN options. */
 
 static void check_asan_opts(void) {
-  u8* x = getenv("ASAN_OPTIONS");
+  //读取环境变量ASAN_OPTIONS和MSAN_OPTIONS，并做一些检查
+  u8* x = getenv("ASAN_OPTIONS"); 
 
   if (x) {
 
@@ -7592,7 +7618,7 @@ EXP_ST void detect_file_args(char** argv) {
 /* Set up signal handlers. More complicated that needs to be, because libc on
    Solaris doesn't resume interrupted reads(), sets SA_RESETHAND when you call
    siginterrupt(), and does other stupid things. */
-//设置语句柄
+//设置语句柄(注册必要的信号处理函数)
 EXP_ST void setup_signal_handlers(void) {
 
   struct sigaction sa;
@@ -7621,7 +7647,7 @@ EXP_ST void setup_signal_handlers(void) {
   sigaction(SIGWINCH, &sa, NULL);
 
   /* SIGUSR1: skip entry */
-
+  //USR1:user defined signal 1，留给用户自定义的信号
   sa.sa_handler = handle_skipreq;
   sigaction(SIGUSR1, &sa, NULL);
 
