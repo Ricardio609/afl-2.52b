@@ -157,7 +157,7 @@
 /* Length limits for auto-detected dictionary tokens: */
 
 #define MIN_AUTO_EXTRA      3
-#define MAX_AUTO_EXTRA      32
+#define MAX_AUTO_EXTRA      32   //单个auto extra文件的最大值
 
 /* Maximum number of user-specified dictionary tokens to use in deterministic
    steps; past this point, the "extras/user" step will be still carried out,

@@ -737,7 +737,7 @@ static void mark_as_det_done(struct queue_entry* q) {
 static void mark_as_variable(struct queue_entry* q) {
 
   u8 *fn = strrchr(q->fname, '/') + 1, *ldest;
-
+  //创建符号链接out_dir/queue/.state/variable_behavior/fname
   ldest = alloc_printf("../../%s", fn);
   fn = alloc_printf("%s/queue/.state/variable_behavior/%s", out_dir, fn);
 
@@ -751,7 +751,7 @@ static void mark_as_variable(struct queue_entry* q) {
 
   ck_free(ldest);
   ck_free(fn);
-
+  //设置queue的var_behavior为1
   q->var_behavior = 1;
 
 }
@@ -1823,14 +1823,14 @@ static void maybe_add_auto(u8* mem, u32 len) {
   u32 i;
 
   /* Allow users to specify that they don't want auto dictionaries. */
-
+  //如果用户设置了MAX_AUTO_EXTRAS或者USE_AUTO_EXTRAS为0，则直接返回
   if (!MAX_AUTO_EXTRAS || !USE_AUTO_EXTRAS) return;
 
   /* Skip runs of identical bytes. */
 
   for (i = 1; i < len; i++)
     if (mem[0] ^ mem[i]) break;
-
+  
   if (i == len) return;
 
   /* Reject builtin interesting values. */
@@ -1871,10 +1871,10 @@ static void maybe_add_auto(u8* mem, u32 len) {
   auto_changed = 1;
 
   for (i = 0; i < a_extras_cnt; i++) {
-
+    //memcmp_nocase：比较a_extras[i].data与mem的内容是否相同
     if (a_extras[i].len == len && !memcmp_nocase(a_extras[i].data, mem, len)) {
 
-      a_extras[i].hit_cnt++;
+      a_extras[i].hit_cnt++;  //hit_cnt表示该token被use的次数
       goto sort_a_extras;
 
     }
@@ -1885,7 +1885,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
      append it if we have room. Otherwise, let's randomly evict some other
      entry from the bottom half of the list. */
 
-  if (a_extras_cnt < MAX_AUTO_EXTRAS) {
+  if (a_extras_cnt < MAX_AUTO_EXTRAS) { //如果小于，则表明a_extras数组未填满，可以直接拷贝mem和len
 
     a_extras = ck_realloc_block(a_extras, (a_extras_cnt + 1) *
                                 sizeof(struct extra_data));
@@ -1894,8 +1894,8 @@ static void maybe_add_auto(u8* mem, u32 len) {
     a_extras[a_extras_cnt].len  = len;
     a_extras_cnt++;
 
-  } else {
-
+  } else {  
+    //若a_extras已满，从a_extras数组的后半部分里，随机替换掉一个元素的a_extras[i].data为ck_memdup(mem, len)，并将len设置为len，hit_cnt设置为0
     i = MAX_AUTO_EXTRAS / 2 +
         UR((MAX_AUTO_EXTRAS + 1) / 2);
 
@@ -1951,7 +1951,7 @@ static void save_auto(void) {
 
 
 /* Load automatically generated extras. */
-
+//load自动生成的提取出来的词典token
 static void load_auto(void) {
 
   u32 i;
@@ -1959,9 +1959,9 @@ static void load_auto(void) {
   for (i = 0; i < USE_AUTO_EXTRAS; i++) {
 
     u8  tmp[MAX_AUTO_EXTRA + 1];
-    u8* fn = alloc_printf("%s/.state/auto_extras/auto_%06u", in_dir, i);
+    u8* fn = alloc_printf("%s/.state/auto_extras/auto_%06u", in_dir, i);  
     s32 fd, len;
-
+    //以只读模式尝试打开文件名为alloc_printf("%s/.state/auto_extras/auto_%06u", in_dir, i)的文件
     fd = open(fn, O_RDONLY, 0600);
 
     if (fd < 0) {
@@ -2579,13 +2579,16 @@ static void show_stats(void);
 //在perform_dry_run，save_if_interesting，fuzz_one，pilot_fuzzing,core_fuzzing函数中均有调用
 //该函数主要用途是init_forkserver；将testcase运行多次；用update_bitmap_score进行初始的byte排序
 //校准一个新的测试用例。这是在处理输入目录时完成的，以便在早期就警告有问题的测试用例;当发现新的路径来检测变量行为等等
+
+//这个函数评估input文件夹下的case，来发现这些testcase的行为是否异常；以及在发现新的路径时，用以评估这个新发现的testcase的
+//行为是否是可变（这里的可变是指多次执行这个case，发现的路径不同）等等
 static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
                          u32 handicap, u8 from_queue) {
 //函数最后一个参数from_queue,判断是否是为队列中的||刚恢复fuzz 以此设置较长的时间延迟
   static u8 first_trace[MAP_SIZE];
 
   u8  fault = 0, new_bits = 0, var_detected = 0,
-      first_run = (q->exec_cksum == 0);
+      first_run = (q->exec_cksum == 0); //如果q->exec_cksum为0，代表这是这个case第一次运行，即来自input文件夹下，所以将first_run置为1
 
   u64 start_us, stop_us;
 
@@ -2597,32 +2600,41 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
      trying to calibrate already-added finds. This helps avoid trouble due
      to intermittent latency. */
 
-  if (!from_queue || resuming_fuzz)
+  if (!from_queue || resuming_fuzz)   
+  //如果from_queue是0或者resuming_fuzz被置为1，即代表不来自于queue中或者在resuming sessions的时候，则use_tmout的值被设置的更大
     use_tmout = MAX(exec_tmout + CAL_TMOUT_ADD,
                     exec_tmout * CAL_TMOUT_PERC / 100);
 
   q->cal_failed++;    //testcase参数q->cal_failed++ 是否校准失败参数++
 
   stage_name = "calibration";   //阶段名称
-  stage_max  = fast_cal ? 3 : CAL_CYCLES;
+  //根据是否fast_cal为1，来设置stage_max的值为3还是CAL_CYCLES(默认为8)，含义是每个新测试用例（以及显示出可变行为的测试用例）的校准
+  //周期数，也就是说这个stage要执行几次的意思
+  stage_max  = fast_cal ? 3 : CAL_CYCLES; 
 
   /* Make sure the forkserver is up before we do anything, and let's not
      count its spin-up time toward binary calibration. */
   //判断是否已经启动forkserver ,调用函数init_forkserver()启动fork服务
   if (dumb_mode != 1 && !no_forkserver && !forksrv_pid)
     init_forkserver(argv);
+  //如果这个queue不是来自input文件夹，而是评估新case，则此时q->exec_cksum不为空，拷贝trace_bits到first_trace里，然后
+  //计算has_new_bits的值，赋值给new_bits
+
   //拷贝trace_bits到first_trace
   if (q->exec_cksum) memcpy(first_trace, trace_bits, MAP_SIZE);
   //获取开始时间start_us
   start_us = get_cur_time_us();
+
+  /* 开始执行calibration stage，共执行sstage_max轮 */
   //循环多次执行这个testcase，循环的次数 8次或者3次，取决于是否快速校准
   //猜测：对同一个初始testcase多次运行的意义可能是，觉得有些targetApp执行同一个testcase可能也会出现不同的路径
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
 
     u32 cksum;
-
+    //如果这个queue不是来自input文件夹，而是评估新case，且第一轮calibration stage执行结束
+    //时，刷新一次展示界面show_stats，用来展示这次执行的结果，此后不再展示
     if (!first_run && !(stage_cur % stats_update_freq)) show_stats();
-    //将修改后的数据写入文件进行测试
+    //将修改后的数据写入文件进行测试，即将从q->fname中读取的内容写入到.cur_input中
     write_to_testcase(use_mem, q->len);
     //通知forkserver可以开始fork并fuzz
     fault = run_target(argv, use_tmout);
@@ -2631,7 +2643,8 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
        we want to bail out quickly. */
 
     if (stop_soon || fault != crash_mode) goto abort_calibration;
-
+    //如果这是calibration stage第一次运行，且不在dumb_mode，且共享内存里没有
+    //任何路径（即没有任何byte被置位），设置fault为FAULT_NOINST,然后goto abort_calibration
     if (!dumb_mode && !stage_cur && !count_bytes(trace_bits)) {
       fault = FAULT_NOINST;
       goto abort_calibration;
@@ -2640,18 +2653,19 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);   //校验此次运行的trace_bits，检查是否出现新的情况
     //先用cksum也就是本次运行的出现trace_bits哈希和本次testcase q->exec_cksum对比
     //如果发现不同，则调用has_new_bits函数和我们的总表virgin_bits对比
-    if (q->exec_cksum != cksum) {
-
+    if (q->exec_cksum != cksum) {  
+      //如果q->exec_cksum不等于cksum，即代表这是第一次运行，或者在相同的参数下，每次执行，cksum却不同，是一个路径可变的queue
       u8 hnb = has_new_bits(virgin_bits);
       if (hnb > new_bits) new_bits = hnb;
       //判断判断q->exec_cksum 是否为0，不为0那说明不是第一次执行
       //后面运行的时候如果，和前面第一次trace_bits结果不同，则需要多运行几次
-      if (q->exec_cksum) {
+      if (q->exec_cksum) {  //如果q->exec_cksum不等于0，即代表这是判断是否是可变queue
 
         u32 i;
 
         for (i = 0; i < MAP_SIZE; i++) {
-
+          //如果first_trace[i]不等于trace_bits[i]，代表发现了可变queue，且var_bytes
+          //为空，则将该字节设置为1，并将stage_max设置为CAL_CYCLES_LONG，即需要执行40次
           if (!var_bytes[i] && first_trace[i] != trace_bits[i]) {
 
             var_bytes[i] = 1;
@@ -2663,10 +2677,10 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
         var_detected = 1;
 
-      } else {
+      } else {  //即q->exec_cksum等于0，即代表这是第一次执行这个queue
 
-        q->exec_cksum = cksum;
-        memcpy(first_trace, trace_bits, MAP_SIZE);
+        q->exec_cksum = cksum;  //设置q->exec_cksum的值为之前计算出来的本次执行的cksum
+        memcpy(first_trace, trace_bits, MAP_SIZE);  //拷贝trace_bits到first_trace中
 
       }
 
@@ -2675,19 +2689,19 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   }
 
   stop_us = get_cur_time_us();
-
-  total_cal_us     += stop_us - start_us;
+  //保存所有轮次总的执行时间，加到total_cal_us里，总的执行轮次，加到total_cal_cycles里
+  total_cal_us     += stop_us - start_us; 
   total_cal_cycles += stage_max;
 
   /* OK, let's collect some stats about the performance of this test case.
      This is used for fuzzing air time calculations in calculate_score(). */
 
-  q->exec_us     = (stop_us - start_us) / stage_max;  //执行时间延迟
-  q->bitmap_size = count_bytes(trace_bits);   //bitmap大小
+  q->exec_us     = (stop_us - start_us) / stage_max;  //执行时间延迟，计算出单次执行时间的平均值保存到q->exec_us里
+  q->bitmap_size = count_bytes(trace_bits);   //bitmap大小，将最后一次执行所覆盖到的路径数保存到q->bitmap_size里
   q->handicap    = handicap;
   q->cal_failed  = 0;   //校准错误
 
-  total_bitmap_size += q->bitmap_size;
+  total_bitmap_size += q->bitmap_size;  //total_bitmap_size里加上这个queue所覆盖到的路径数
   total_bitmap_entries++;
   // 对这个测试用例的每一个byte进行排序，用一个top_rate[]来维护它的最佳入口
   update_bitmap_score(q);
@@ -2696,32 +2710,34 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
      parent. This is a non-critical problem, but something to warn the user
      about. */
   //如果这种情况没有从检测中得到new_bit，则告诉父程序。这是一个无关紧要的问题，但是需要提醒用户注意
+  //如果fault为FAULT_NONE，且该queue是第一次执行，且不属于dumb_mode，而且new_bits为0，代表在这个样例
+  //所有轮次的执行里，都没有发现任何新路径和出现异常，设置fault为FAULT_NOBITS
   if (!dumb_mode && first_run && !fault && !new_bits) fault = FAULT_NOBITS;
 //中断校准
 abort_calibration:
 
   if (new_bits == 2 && !q->has_new_cov) {
     q->has_new_cov = 1;
-    queued_with_cov++;
+    queued_with_cov++;  //代表有一个queue发现了新路径
   }
 
   /* Mark variable paths. */
-
+  //如果这个queue是可变路径，即var_detected为1，则计算var_bytes里被置位的tuple个数，保存到var_byte_count里，代表这些tuple具有可变的行为
   if (var_detected) {
-
+    //通过count_bytes函数，计算共享内存里有多少字节被置位了
     var_byte_count = count_bytes(var_bytes);
 
     if (!q->var_behavior) {
-      mark_as_variable(q);
+      mark_as_variable(q);  //将这个queue标记为一个variable
       queued_variable++;
     }
 
   }
-
+  //恢复之前的stage值
   stage_name = old_sn;
   stage_cur  = old_sc;
   stage_max  = old_sm;
-
+  //如果不是第一次运行这个queue，展示show_stats
   if (!first_run) show_stats();
 
   return fault;
@@ -2734,10 +2750,11 @@ abort_calibration:
 static void check_map_coverage(void) {
 
   u32 i;
-
+  //计数trace_bits发现的路径数，如果小于100，就直接返回
   if (count_bytes(trace_bits) < 100) return;
 
   for (i = (1 << (MAP_SIZE_POW2 - 1)); i < MAP_SIZE; i++)
+    //在trace_bits的数组后半段，如果有值就直接返回
     if (trace_bits[i]) return;
 
   WARNF("Recompile binary with newer version of afl to improve coverage!");
@@ -2752,7 +2769,7 @@ static void perform_dry_run(char** argv) {
 
   struct queue_entry* q = queue;
   u32 cal_failures = 0;
-  u8* skip_crashes = getenv("AFL_SKIP_CRASHES");
+  u8* skip_crashes = getenv("AFL_SKIP_CRASHES");  //读取环境变量AFL_SKIP_CRASHES到skip_crashes,设置cal_failures为0
 
   while (q) {
 
@@ -2781,12 +2798,12 @@ static void perform_dry_run(char** argv) {
 
     if (res == crash_mode || res == FAULT_NOBITS)
       SAYF(cGRA "    len = %u, map size = %u, exec speed = %llu us\n" cRST, 
-           q->len, q->bitmap_size, q->exec_us);
+           q->len, q->bitmap_size, q->exec_us); //打印
     //根据返回值res，查看哪种错误并进行判断。错误类型在本文件开头定义
     switch (res) {
 
       case FAULT_NONE:
-
+        //如果q是头结点，即第一个测试用例，则check_map_coverage，用以评估map coverage
         if (q == queue) check_map_coverage();
 
         if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
@@ -2796,11 +2813,11 @@ static void perform_dry_run(char** argv) {
       case FAULT_TMOUT:
 
         if (timeout_given) {
-
+          //如果指定了-t参数，则timeout_given值为2
           /* The -t nn+ syntax in the command line sets timeout_given to '2' and
              instructs afl-fuzz to tolerate but skip queue entries that time
              out. */
-
+          
           if (timeout_given > 1) {
             WARNF("Test case results in a timeout (skipping)");
             q->cal_failed = CAL_CHANCES;
@@ -2842,7 +2859,7 @@ static void perform_dry_run(char** argv) {
           cal_failures++;
           break;
         }
-
+        //如果没有指定mem_limit，则可能抛出建议增加内存的建议
         if (mem_limit) {
 
           SAYF("\n" cLRD "[-] " cRST
@@ -2906,15 +2923,15 @@ static void perform_dry_run(char** argv) {
         FATAL("Test case '%s' results in a crash", fn);
 
       case FAULT_ERROR:
-
+        //抛出异常
         FATAL("Unable to execute target application ('%s')", argv[0]);
 
       case FAULT_NOINST:
-
+        //这个样例运行没有出现任何路径信息，抛出异常
         FATAL("No instrumentation detected");
 
       case FAULT_NOBITS: 
-
+        //如果这个样例有出现路径信息，但是没有任何新路径，抛出警告，并认为这是无用路径
         useless_at_start++;
 
         if (!in_bitmap && !shuffle_queue)
@@ -2923,8 +2940,8 @@ static void perform_dry_run(char** argv) {
         break;
 
     }
-
-    if (q->var_behavior) WARNF("Instrumentation output varies across runs.");
+    //如果这个样例q的var_behavior为真，则代表它多次运行，同样的输入条件下，却出现不同的覆盖信息
+    if (q->var_behavior) WARNF("Instrumentation output varies across runs."); //代表这个样例的路径输出可变
 
     q = q->next;
 
@@ -2993,9 +3010,9 @@ static void pivot_inputs(void) {
   u32 id = 0;
 
   ACTF("Creating hard links for all input files...");
-
+  //依次遍历queue里的queue_entry
   while (q) {
-
+    //在q->fname里找到最后一个’/‘所在的位置，如果找不到，则rsl = q->fname,否则rsl指向’/‘后的第一个字符,其实也就是最后一个/后面的字符串
     u8  *nfn, *rsl = strrchr(q->fname, '/');
     u32 orig_id;
 
@@ -3010,7 +3027,7 @@ static void pivot_inputs(void) {
 #else
 #  define CASE_PREFIX "id_"
 #endif /* ^!SIMPLE_FILES */
-
+    //将rsl的前三个字节和id进行比较
     if (!strncmp(rsl, CASE_PREFIX, 3) &&
         sscanf(rsl + 3, "%06u", &orig_id) == 1 && orig_id == id) {
 
@@ -3041,7 +3058,7 @@ static void pivot_inputs(void) {
          substring. */
 
 #ifndef SIMPLE_FILES
-
+      //在rsl里寻找,orig:子串，如果找到了，将use_name指向该子串的冒号后的名字；如果没找到，就另use_name = rsl
       u8* use_name = strstr(rsl, ",orig:");
 
       if (use_name) use_name += 6; else use_name = rsl;
@@ -3056,13 +3073,13 @@ static void pivot_inputs(void) {
     }
 
     /* Pivot to the new queue entry. */
-
+    //修改q的fname指向这个硬连接
     link_or_copy(q->fname, nfn);
     ck_free(q->fname);
     q->fname = nfn;
 
     /* Make sure that the passed_det value carries over, too. */
-
+    //mark_as_det_done：简单的说就是打开out_dir/queue/.state/deterministic_done/use_name这个文件，如果不存在就创建这个文件，然后设置q的passed_det为1
     if (q->passed_det) mark_as_det_done(q);
 
     q = q->next;
@@ -3637,27 +3654,27 @@ static double get_runnable_processes(void) {
 static void nuke_resume_dir(void) {
 
   u8* fn;
-
+  //删除out_dir/_resume/.state/deterministic_done文件夹下所有id:前缀的文件
   fn = alloc_printf("%s/_resume/.state/deterministic_done", out_dir);
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
-
+  //删除out_dir/_resume/.state/auto_extras文件夹下所有auto_前缀的文件
   fn = alloc_printf("%s/_resume/.state/auto_extras", out_dir);
   if (delete_files(fn, "auto_")) goto dir_cleanup_failed;
   ck_free(fn);
-
+  //删除out_dir/_resume/.state/redundant_edges文件夹下所有id:前缀的文件
   fn = alloc_printf("%s/_resume/.state/redundant_edges", out_dir);
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
-
+  //删除out_dir/_resume/.state/variable_behavior文件夹下所有id:前缀的文件
   fn = alloc_printf("%s/_resume/.state/variable_behavior", out_dir);
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
-
+  //删除文件夹out_dir/_resume/.state
   fn = alloc_printf("%s/_resume/.state", out_dir);
   if (rmdir(fn) && errno != ENOENT) goto dir_cleanup_failed;
   ck_free(fn);
-
+  //删除out_dir/_resume文件夹下所有id:前缀的文件
   fn = alloc_printf("%s/_resume", out_dir);
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
