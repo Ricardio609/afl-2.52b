@@ -84,10 +84,11 @@ static u8   use_64bit = 0;
 /* Examine and modify parameters to pass to 'as'. Note that the file name
    is always the last parameter passed by GCC, so we exploit this property
    to keep the code simple. */
-
+//检查并修改参数以传递给as。请注意，文件名始终是GCC传递的最后一个参数，因此我们利用这个特性使代码保持简单。
+//主要是设置变量as_params的值，以及use_64bit/modified_file的值。
 static void edit_params(int argc, char** argv) {
 
-  u8 *tmp_dir = getenv("TMPDIR"), *afl_as = getenv("AFL_AS");
+  u8 *tmp_dir = getenv("TMPDIR"), *afl_as = getenv("AFL_AS");   ////读取AFL_AS环境变量，如果存在就设置为afl_as的值
   u32 i;
 
 #ifdef __APPLE__
@@ -105,7 +106,7 @@ static void edit_params(int argc, char** argv) {
      The tools aren't cmdline-compatible, but at least for now, we can
      seemingly get away with this by making only very minor tweaks. Thanks
      to Nico Weber for the idea. */
-
+  //因为apple的一些原因，所以如果我们定义了__APPLE__宏，且当前是在clang_mode且没有设置AFL_AS环境变量，就设置use_clang_as为1，并设置afl_as为AFL_CC/AFL_CXX/clang中的一种
   if (clang_mode && !afl_as) {
 
     use_clang_as = 1;
@@ -121,17 +122,17 @@ static void edit_params(int argc, char** argv) {
   /* Although this is not documented, GCC also uses TEMP and TMP when TMPDIR
      is not set. We need to check these non-standard variables to properly
      handle the pass_thru logic later on. */
-
+  //依次检查是否存在TMPDIR/TEMP/TMP环境变量，如果存在就设置，如果都不存在就设置tmp_dir为”/tmp”
   if (!tmp_dir) tmp_dir = getenv("TEMP");
   if (!tmp_dir) tmp_dir = getenv("TMP");
   if (!tmp_dir) tmp_dir = "/tmp";
-
+  //首先为as_params分配空间，大小为(argc+32)*8
   as_params = ck_alloc((argc + 32) * sizeof(u8*));
-
+  //如果afl_as不为空，就设置as_params[0]为afl_as，否则设置为as
   as_params[0] = afl_as ? afl_as : (u8*)"as";
 
   as_params[argc] = 0;
-
+  //遍历从argv[1]开始,到argv[argc-1](也就是最后一个参数)之前的argv参数
   for (i = 1; i < argc - 1; i++) {
 
     if (!strcmp(argv[i], "--64")) use_64bit = 1;
@@ -140,7 +141,7 @@ static void edit_params(int argc, char** argv) {
 #ifdef __APPLE__
 
     /* The Apple case is a bit different... */
-
+    //如果是apple,则如果存在-arch x86_64,设置use_64bit为1,并跳过-q和-Q选项
     if (!strcmp(argv[i], "-arch") && i + 1 < argc) {
 
       if (!strcmp(argv[i + 1], "x86_64")) use_64bit = 1;
@@ -156,16 +157,16 @@ static void edit_params(int argc, char** argv) {
       continue;
 
 #endif /* __APPLE__ */
-
+    //设置as_params的值为argv对应的参数值
     as_params[as_par_cnt++] = argv[i];
 
   }
-
+//开始设置其他的as_params参数
 #ifdef __APPLE__
 
   /* When calling clang as the upstream assembler, append -c -x assembler
      and hope for the best. */
-
+  //如果use_clang_as为1，则设置-c -x assembler选项
   if (use_clang_as) {
 
     as_params[as_par_cnt++] = "-c";
@@ -175,11 +176,11 @@ static void edit_params(int argc, char** argv) {
   }
 
 #endif /* __APPLE__ */
-
+  //读取argv[argc - 1]的值,赋给input_file的值,也就是传递的最后一个参数的值作为input_file
   input_file = argv[argc - 1];
 
   if (input_file[0] == '-') {
-
+    
     if (!strcmp(input_file + 1, "-version")) {
       just_version = 1;
       modified_file = input_file;
@@ -195,13 +196,13 @@ static void edit_params(int argc, char** argv) {
        to compile a program, rather than using gcc on an ad-hoc .s file in
        a format we may not understand. This works around an issue compiling
        NSS. */
-
+    //比较input_file和tmp_dir、/var/tmp/、/tmp/的前strlen(tmp_dir)、9、5个字节是否相同，如果不相同，就设置pass_thru为1
     if (strncmp(input_file, tmp_dir, strlen(tmp_dir)) &&
         strncmp(input_file, "/var/tmp/", 9) &&
         strncmp(input_file, "/tmp/", 5)) pass_thru = 1;
 
   }
-
+  //设置modified_file的值为alloc_printf("%s/.afl-%u-%u.s", tmp_dir, getpid(),(u32) time(NULL));,简单的说就是tmp_dir/.afl-pid-time.s这样的字符串
   modified_file = alloc_printf("%s/.afl-%u-%u.s", tmp_dir, getpid(),
                                (u32)time(NULL));
 
@@ -215,7 +216,7 @@ wrap_things_up:
 
 /* Process input file, generate modified_file. Insert instrumentation in all
    the appropriate places. */
-
+//处理输入文件，生成modified_file，将instrumentation插入所有适当的位置
 static void add_instrumentation(void) {
 
   static u8 line[MAX_LINE];
@@ -233,14 +234,14 @@ static void add_instrumentation(void) {
   u8* colon_pos;
 
 #endif /* __APPLE__ */
-
+  //如果input_file不为空，则尝试打开这个文件，如果打开失败就抛出异常，如果为空，则读取标准输入，最终获取FILE* 指针inf
   if (input_file) {
 
     inf = fopen(input_file, "r");
     if (!inf) PFATAL("Unable to read '%s'", input_file);
 
   } else inf = stdin;
-
+  //打开modified_file对应的临时文件，并获取其句柄outfd，再根据句柄通过fdopen函数拿到FILE*指针outf
   outfd = open(modified_file, O_WRONLY | O_EXCL | O_CREAT, 0600);
 
   if (outfd < 0) PFATAL("Unable to write to '%s'", modified_file);
@@ -248,17 +249,21 @@ static void add_instrumentation(void) {
   outf = fdopen(outfd, "w");
 
   if (!outf) PFATAL("fdopen() failed");  
-
+  //通过fgets从inf中逐行读取内容保存到line数组里，每行最多读取的字节数是MAX_LINE(8192),这个值包括’\0’,所以
+  //实际读取的有内容的字节数是MAX_LINE-1个字节。从line数组里将读取的内容写入到outf对应的文件里
   while (fgets(line, MAX_LINE, inf)) {
 
     /* In some cases, we want to defer writing the instrumentation trampoline
        until after all the labels, macros, comments, etc. If we're in this
        mode, and if the line starts with a tab followed by a character, dump
        the trampoline now. */
+    //接下来是有趣的部分。只在.text部分进行插桩，这部分涉及到多平台以及优化后的汇编文件格式
 
+    //判断instrument_next和instr_ok是否都为1，以及line是否以\t开始，且line[1]是否是字母
     if (!pass_thru && !skip_intel && !skip_app && !skip_csect && instr_ok &&
         instrument_next && line[0] == '\t' && isalpha(line[1])) {
-
+      //如果都满足，则设置instrument_next = 0,并向outf中写入trampoline_fmt，并将插桩计数器ins_lines加一
+      //这其实是因为我们想要插入instrumentation trampoline到所有的标签，宏，注释之后
       fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
               R(MAP_SIZE));
 
@@ -276,7 +281,7 @@ static void add_instrumentation(void) {
     /* All right, this is where the actual fun begins. For one, we only want to
        instrument the .text section. So, let's keep track of that in processed
        files - and let's set instr_ok accordingly. */
-
+    //如果line的值为\t.[text\n|section\t.text|section\t__TEXT,__text|section __TEXT,__text]...其中之一，则设置instr_ok为1，然后跳转到while循环首部，去读取下一行的数据到line数组里
     if (line[0] == '\t' && line[1] == '.') {
 
       /* OpenBSD puts jump tables directly inline with the code, which is
@@ -293,7 +298,7 @@ static void add_instrumentation(void) {
         instr_ok = 1;
         continue; 
       }
-
+      //如果不是上面的几种情况，且line的值为\t.[section\t|section |bss\n|data\n]...，则设置instr_ok为0，并跳转到while循环首部，去读取下一行的数据到line数组里
       if (!strncmp(line + 2, "section\t", 8) ||
           !strncmp(line + 2, "section ", 8) ||
           !strncmp(line + 2, "bss\n", 4) ||
@@ -360,14 +365,14 @@ static void add_instrumentation(void) {
     /* Conditional branch instruction (jnz, etc). We append the instrumentation
        right after the branch (to instrument the not-taken path) and at the
        branch destination label (handled later on). */
-
+    //插桩^\tjnz foo条件跳转指令
     if (line[0] == '\t') {
 
       if (line[1] == 'j' && line[2] != 'm' && R(100) < inst_ratio) {
-
-        fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-                R(MAP_SIZE));
-
+        //如果line的值为\tj[!m]...,且R(100) < inst_ratio，R(100)会返回一个100以内的随机数，inst_ratio是我们之前设置的插桩密度，默认为100，如果设置了asan之类的就会默认设置成30左右
+        fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,  
+                R(MAP_SIZE));     //根据use_64bit来判断向outfd里写入trampoline_fmt_64还是trampoline_fmt_32
+        //这里的R(x)实际上是用来区分每个桩的，也就是是一个标识
         ins_lines++;
 
       }
@@ -391,7 +396,7 @@ static void add_instrumentation(void) {
 #else
 
     /* Everybody else: .L<whatever>: */
-
+    //首先检查该行中是否存在:，然后检查是否以.开始
     if (strstr(line, ":")) {
 
       if (line[0] == '.') {
@@ -410,7 +415,8 @@ static void add_instrumentation(void) {
 #else
 
         /* Apple: .L<num> / .LBB<num> */
-
+        //如果以.开始，则代表想要插桩^.L0:或者^.LBB0_0:这样的branch label，即style jump destination
+        //然后检查line[2]是否为数字 或者 如果是在clang_mode下，比较从line[1]开始的三个字节是否为LBB. 前述所得结果和R(100) < inst_ratio)相与
         if ((isdigit(line[2]) || (clang_mode && !strncmp(line + 1, "LBB", 3)))
             && R(100) < inst_ratio) {
 
@@ -431,7 +437,7 @@ static void add_instrumentation(void) {
 
         }
 
-      } else {
+      } else {    //否则代表这是一个function，插桩^func:function entry point
 
         /* Function label (always instrumented, deferred mode). */
 
@@ -442,7 +448,7 @@ static void add_instrumentation(void) {
     }
 
   }
-
+  //如果插桩计数器ins_lines不为0，就在完全拷贝input_file之后，依据架构，像outf中写入main_payload_64或者main_payload_32，然后关闭这两个文件
   if (ins_lines)
     fputs(use_64bit ? main_payload_64 : main_payload_32, outf);
 
@@ -462,6 +468,7 @@ static void add_instrumentation(void) {
   }
 
 }
+//从add_instrumentation可以看出，插桩是通过汇编的前导命令来判断这是否是一个分支或者函数，然后插入instrumentation trampoline
 
 
 /* Main entry point */
@@ -503,7 +510,7 @@ int main(int argc, char** argv) {
 
   rand_seed = tv.tv_sec ^ tv.tv_usec ^ getpid();
 
-  srandom(rand_seed);
+  srandom(rand_seed); //设置srandom的随机种子
 
   edit_params(argc, argv);
 
@@ -516,31 +523,31 @@ int main(int argc, char** argv) {
 
   if (getenv(AS_LOOP_ENV_VAR))
     FATAL("Endless loop when calling 'as' (remove '.' from your PATH)");
-
+  //设置环境变量AS_LOOP_ENV_VAR的值为1
   setenv(AS_LOOP_ENV_VAR, "1", 1);
 
   /* When compiling with ASAN, we don't have a particularly elegant way to skip
      ASAN-specific branches. But we can probabilistically compensate for
      that... */
-
+  //读取环境变量AFL_USE_ASAN和AFL_USE_MSAN的值，如果其中有一个为1，则设置sanitizer为1，且将inst_ratio除3
   if (getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) {
     sanitizer = 1;
-    inst_ratio /= 3;
+    inst_ratio /= 3;    //这是因为AFL无法在插桩的时候识别出ASAN specific branches，所以会插入很多无意义的桩，为了降低这种概率，粗暴的将整个插桩的概率都除以3
   }
 
   if (!just_version) add_instrumentation();
-
+  //fork出一个子进程，让子进程来执行execvp(as_params[0], (char **) as_params);
   if (!(pid = fork())) {
-
+    //execvp执行的时候，会用as_params[0]来完全替换掉当前进程空间中的程序，如果不通过子进程来执行实际的as，那么后续就无法在执行完实际的as之后，还能unlink掉modified_file
     execvp(as_params[0], (char**)as_params);
     FATAL("Oops, failed to execute '%s' - check your PATH", as_params[0]);
 
   }
 
   if (pid < 0) PFATAL("fork() failed");
-
+  //等待子进程结束
   if (waitpid(pid, &status, 0) <= 0) PFATAL("waitpid() failed");
-
+  //读取环境变量AFL_KEEP_ASSEMBLY的值，如果没有设置这个环境变量，就unlink掉modified_file
   if (!getenv("AFL_KEEP_ASSEMBLY")) unlink(modified_file);
 
   exit(WEXITSTATUS(status));

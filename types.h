@@ -69,7 +69,7 @@ typedef int64_t  s64;
   })
 
 #ifdef AFL_LLVM_PASS
-#  define AFL_R(x) (random() % (x))
+#  define AFL_R(x) (random() % (x))   //R(x)是创建的随机数除以x取余，所以可能产生碰撞
 #else
 #  define R(x) (random() % (x))
 #endif /* ^AFL_LLVM_PASS */

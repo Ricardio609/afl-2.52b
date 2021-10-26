@@ -52,12 +52,12 @@ static u8   be_quiet,               /* Quiet mode                        */
 
 /* Try to find our "fake" GNU assembler in AFL_PATH or at the location derived
    from argv[0]. If that fails, abort. */
-
+//寻找afl-as的位置
 static void find_as(u8* argv0) {
 
   u8 *afl_path = getenv("AFL_PATH");
   u8 *slash, *tmp;
-
+  //首先检查是否存在AFL_PATH这个路径，如果存在就赋值给as_path,然后检查afl_path_/as这个路径是否可以访问
   if (afl_path) {
 
     tmp = alloc_printf("%s/as", afl_path);
@@ -73,7 +73,8 @@ static void find_as(u8* argv0) {
   }
 
   slash = strrchr(argv0, '/');
-
+  //如果不存在AFL_PATH这个环境变量，则检查argv0，例如（”/Users/sakura/gitsource/AFL/cmake-build-debug/afl-gcc”）
+  //中是否存在’/‘，如果有就找到最后一个’/‘所在的位置，并取其前面的字符串作为dir，然后检查dir/afl-as这个文件是否可以访问，如果可以访问，就将dir设置为as_path
   if (slash) {
 
     u8 *dir;
@@ -106,7 +107,7 @@ static void find_as(u8* argv0) {
 
 
 /* Copy argv to cc_params, making the necessary edits. */
-
+//这个函数主要是将argv拷贝到u8 **cc_params中，并做必要的编辑
 static void edit_params(u32 argc, char** argv) {
 
   u8 fortify_set = 0, asan_set = 0;
@@ -115,27 +116,27 @@ static void edit_params(u32 argc, char** argv) {
 #if defined(__FreeBSD__) && defined(__x86_64__)
   u8 m32_set = 0;
 #endif
-
+  //它首先通过ck_alloc来为cc_params分配内存，分配的长度为(argc+128)*8，相当大的内存
   cc_params = ck_alloc((argc + 128) * sizeof(u8*));
-
+  //然后检查argv[0]里有没有’/‘，如果没有就赋值’argv[0]’到name，如果有就找到最后一个’/‘所在的位置，然后跳过这个’/‘，将后面的字符串赋值给name
   name = strrchr(argv[0], '/');
   if (!name) name = argv[0]; else name++;
-
+  //将name与afl-clang比较，如果相同，则设置clang_mode为1，然后设置环境变量CLANG_ENV_VAR为1
   if (!strncmp(name, "afl-clang", 9)) {
 
     clang_mode = 1;
 
     setenv(CLANG_ENV_VAR, "1", 1);
 
-    if (!strcmp(name, "afl-clang++")) {
+    if (!strcmp(name, "afl-clang++")) {   //如果相同，则获取环境变量AFL_CXX的值，如果该值存在，则将cc_params[0]设置为该值，如果不存在，就设置为clang++
       u8* alt_cxx = getenv("AFL_CXX");
       cc_params[0] = alt_cxx ? alt_cxx : (u8*)"clang++";
-    } else {
+    } else {                              //如果不相同，则获取环境变量AFL_CC的值，如果该值存在，则将cc_params[0]设置为该值，如果不存在，就设置为clang
       u8* alt_cc = getenv("AFL_CC");
       cc_params[0] = alt_cc ? alt_cc : (u8*)"clang";
     }
 
-  } else {
+  } else {    //如果不相同，则将name和afl-g++比较
 
     /* With GCJ and Eclipse installed, you can actually compile Java! The
        instrumentation will work (amazingly). Alas, unhandled exceptions do
@@ -144,7 +145,7 @@ static void edit_params(u32 argc, char** argv) {
        binaries. Meh. */
 
 #ifdef __APPLE__
-
+    
     if (!strcmp(name, "afl-g++")) cc_params[0] = getenv("AFL_CXX");
     else if (!strcmp(name, "afl-gcj")) cc_params[0] = getenv("AFL_GCJ");
     else cc_params[0] = getenv("AFL_CC");
@@ -161,14 +162,15 @@ static void edit_params(u32 argc, char** argv) {
     }
 
 #else
-
+    //如果相同，则获取环境变量AFL_CXX的值，如果该值存在，则将cc_params[0]设置为该值，如果不存在，就设置为g++
+    //如果不相同，则获取环境变量AFL_CC的值，如果该值存在，则将cc_params[0]设置为该值，如果不存在，就设置为gcc
     if (!strcmp(name, "afl-g++")) {
       u8* alt_cxx = getenv("AFL_CXX");
       cc_params[0] = alt_cxx ? alt_cxx : (u8*)"g++";
     } else if (!strcmp(name, "afl-gcj")) {
       u8* alt_cc = getenv("AFL_GCJ");
       cc_params[0] = alt_cc ? alt_cc : (u8*)"gcj";
-    } else {
+    } else {  
       u8* alt_cc = getenv("AFL_CC");
       cc_params[0] = alt_cc ? alt_cc : (u8*)"gcc";
     }
@@ -176,10 +178,10 @@ static void edit_params(u32 argc, char** argv) {
 #endif /* __APPLE__ */
 
   }
-
+  //遍历从argv[1]开始的argv参数
   while (--argc) {
     u8* cur = *(++argv);
-
+    //跳过-B/integrated-as/-pipe
     if (!strncmp(cur, "-B", 2)) {
 
       if (!be_quiet) WARNF("-B is already set, overriding");
@@ -196,16 +198,18 @@ static void edit_params(u32 argc, char** argv) {
 #if defined(__FreeBSD__) && defined(__x86_64__)
     if (!strcmp(cur, "-m32")) m32_set = 1;
 #endif
-
+    //如果存在-fsanitize=address或者-fsanitize=memory，就设置asan_set为1
     if (!strcmp(cur, "-fsanitize=address") ||
         !strcmp(cur, "-fsanitize=memory")) asan_set = 1;
-
+    //如果存在FORTIFY_SOURCE，则设置fortify_set为1
     if (strstr(cur, "FORTIFY_SOURCE")) fortify_set = 1;
 
     cc_params[cc_par_cnt++] = cur;
 
   }
+  //开始设置其他的cc_params参数
 
+  //取之前计算出来的as_path，然后设置-B as_path
   cc_params[cc_par_cnt++] = "-B";
   cc_params[cc_par_cnt++] = as_path;
 
@@ -220,16 +224,17 @@ static void edit_params(u32 argc, char** argv) {
       cc_params[cc_par_cnt++] = "-D_FORTIFY_SOURCE=2";
 
   }
-
+  //sanitizer
+  ////如果asan_set在上面被设置为1，则使AFL_USE_ASAN环境变量为1
   if (asan_set) {
 
     /* Pass this on to afl-as to adjust map density. */
-
+    
     setenv("AFL_USE_ASAN", "1", 1);
 
-  } else if (getenv("AFL_USE_ASAN")) {
+  } else if (getenv("AFL_USE_ASAN")) {  //如果存在AFL_USE_ASAN环境变量，则设置-fsanitize=address
 
-    if (getenv("AFL_USE_MSAN"))
+    if (getenv("AFL_USE_MSAN"))   
       FATAL("ASAN and MSAN are mutually exclusive");
 
     if (getenv("AFL_HARDEN"))
@@ -238,7 +243,7 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "-U_FORTIFY_SOURCE";
     cc_params[cc_par_cnt++] = "-fsanitize=address";
 
-  } else if (getenv("AFL_USE_MSAN")) {
+  } else if (getenv("AFL_USE_MSAN")) {    //如果存在AFL_USE_MSAN环境变量，则设置-fsanitize=memory，但不能同时还指定AFL_HARDEN或者AFL_USE_ASAN，因为这样运行时速度过慢
 
     if (getenv("AFL_USE_ASAN"))
       FATAL("ASAN and MSAN are mutually exclusive");
@@ -291,13 +296,14 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "-fno-builtin-strcasestr";
 
   }
-
+  //终止对cc_params的编辑
   cc_params[cc_par_cnt] = NULL;
 
 }
 
 
 /* Main entry point */
+//afl-gcc就是找到as所在的位置，将其加入搜索路径，然后设置必要的gcc参数和一些宏，然后调用gcc进行实际的编译，仅仅只是一层wrapper
 
 int main(int argc, char** argv) {
 
@@ -324,11 +330,11 @@ int main(int argc, char** argv) {
     exit(1);
 
   }
-
+  ////查找fake GNU assembler
   find_as(argv[0]);
-
+  // 设置CC的参数
   edit_params(argc, argv);
-
+  // 调用execvp来执行CC
   execvp(cc_params[0], (char**)cc_params);
 
   FATAL("Oops, failed to execute '%s' - check your PATH", cc_params[0]);
