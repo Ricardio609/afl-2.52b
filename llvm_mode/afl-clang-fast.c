@@ -41,7 +41,7 @@ static u32  cc_par_cnt = 1;         /* Param count, including argv0      */
 /* Try to find the runtime libraries. If that fails, abort. */
 
 static void find_obj(u8* argv0) {
-
+  //获取环境变量AFL_PATH的值，如果存在，就去读取AFL_PATH/afl-llvm-rt.o是否可以访问，如果可以就设置这个目录为obj_path，然后直接返回
   u8 *afl_path = getenv("AFL_PATH");
   u8 *slash, *tmp;
 
@@ -58,7 +58,8 @@ static void find_obj(u8* argv0) {
     ck_free(tmp);
 
   }
-
+  //如果没有设置这个环境变量，就检查arg0中是否存在/，例如我们可能是通过/home/sakura/AFL/afl-clang-fast去调用afl-clang-fast的，所以它此时就认为最后一个/之前的/home/sakura/AFL是AFL的根
+  //目录，然后读取其下的afl-llvm-rt.o文件，看是否能够访问，如果可以就设置这个目录为obj_path，然后直接返回
   slash = strrchr(argv0, '/');
 
   if (slash) {
@@ -81,12 +82,12 @@ static void find_obj(u8* argv0) {
     ck_free(dir);
 
   }
-
+  //最后如果上面两种都找不到，因为默认的AFL的MakeFile在编译的时候，会定义一个名为AFL_PATH的宏，其指向/usr/local/lib/afl,会到这里找是否存在afl-llvm-rt.o，如果存在设置obj_path并直接返回
   if (!access(AFL_PATH "/afl-llvm-rt.o", R_OK)) {
     obj_path = AFL_PATH;
     return;
   }
-
+  //如果上述三种方式都找不到，那么就会抛出异常
   FATAL("Unable to find 'afl-llvm-rt.o' or 'afl-llvm-pass.so'. Please set AFL_PATH");
  
 }
@@ -103,7 +104,7 @@ static void edit_params(u32 argc, char** argv) {
 
   name = strrchr(argv[0], '/');
   if (!name) name = argv[0]; else name++;
-
+  //据我们执行的是afl-clang-fast还是afl-clang-fast++来决定cc_params[0]的值是clang++还是clang
   if (!strcmp(name, "afl-clang-fast++")) {
     u8* alt_cxx = getenv("AFL_CXX");
     cc_params[0] = alt_cxx ? alt_cxx : (u8*)"clang++";
@@ -118,12 +119,14 @@ static void edit_params(u32 argc, char** argv) {
      instead. The latter is a very recent addition - see:
 
      http://clang.llvm.org/docs/SanitizerCoverage.html#tracing-pcs-with-guards */
+//默认情况下，我们通过afl-llvm-pass.so来注入instrumentation，但是现在也支持trace-pc-guard模式
 
+//如果定义了USE_TRACE_PC宏，就将-fsanitize-coverage=trace-pc-guard -mllvm -sanitizer-coverage-block-threshold=0添加到参数里
 #ifdef USE_TRACE_PC
   cc_params[cc_par_cnt++] = "-fsanitize-coverage=trace-pc-guard";
   cc_params[cc_par_cnt++] = "-mllvm";
   cc_params[cc_par_cnt++] = "-sanitizer-coverage-block-threshold=0";
-#else
+#else     //如果没有定义，就依次将-Xclang -load -Xclang obj_path/afl-llvm-pass.so -Qunused-arguments
   cc_params[cc_par_cnt++] = "-Xclang";
   cc_params[cc_par_cnt++] = "-load";
   cc_params[cc_par_cnt++] = "-Xclang";
@@ -135,7 +138,7 @@ static void edit_params(u32 argc, char** argv) {
   /* Detect stray -v calls from ./configure scripts. */
 
   if (argc == 1 && !strcmp(argv[1], "-v")) maybe_linking = 0;
-
+  //依次读取我们传给afl-clang-fast的参数，并添加到cc_params里，不过这里会做一些检查和设置
   while (--argc) {
     u8* cur = *(++argv);
 
@@ -153,14 +156,14 @@ static void edit_params(u32 argc, char** argv) {
     if (strstr(cur, "FORTIFY_SOURCE")) fortify_set = 1;
 
     if (!strcmp(cur, "-shared")) maybe_linking = 0;
-
+    //如果传入参数里有-Wl,-z,defs或者-Wl,--no-undefined，就直接pass掉，不传给clang
     if (!strcmp(cur, "-Wl,-z,defs") ||
         !strcmp(cur, "-Wl,--no-undefined")) continue;
 
     cc_params[cc_par_cnt++] = cur;
 
   }
-
+  //读取环境变量AFL_HARDEN，如果存在，就在cc_params里添加-fstack-protector-all
   if (getenv("AFL_HARDEN")) {
 
     cc_params[cc_par_cnt++] = "-fstack-protector-all";
@@ -169,7 +172,7 @@ static void edit_params(u32 argc, char** argv) {
       cc_params[cc_par_cnt++] = "-D_FORTIFY_SOURCE=2";
 
   }
-
+  //如果参数里没有-fsanitize=address/memory，即asan_set是0，就读取环境变量AFL_USE_ASAN，如果存在就添加-fsanitize=address到cc_params里，环境变量AFL_USE_MSAN同理
   if (!asan_set) {
 
     if (getenv("AFL_USE_ASAN")) {
@@ -197,14 +200,14 @@ static void edit_params(u32 argc, char** argv) {
     }
 
   }
-
+//如果定义了USE_TRACE_PC宏，就检查是否存在环境变量AFL_INST_RATIO，如果存在就抛出异常AFL_INST_RATIO not available at compile time with 'trace-pc'
 #ifdef USE_TRACE_PC
 
   if (getenv("AFL_INST_RATIO"))
     FATAL("AFL_INST_RATIO not available at compile time with 'trace-pc'.");
 
 #endif /* USE_TRACE_PC */
-
+  //读取环境变量AFL_DONT_OPTIMIZE，如果不存在就添加-g -O3 -funroll-loops到参数里
   if (!getenv("AFL_DONT_OPTIMIZE")) {
 
     cc_params[cc_par_cnt++] = "-g";
@@ -212,7 +215,7 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "-funroll-loops";
 
   }
-
+  //读取环境变量AFL_NO_BUILTIN，如果存在就添加-fno-builtin-strcmp等
   if (getenv("AFL_NO_BUILTIN")) {
 
     cc_params[cc_par_cnt++] = "-fno-builtin-strcmp";
@@ -222,7 +225,7 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "-fno-builtin-memcmp";
 
   }
-
+  //添加参数-D__AFL_HAVE_MANUAL_CONTROL=1 -D__AFL_COMPILER=1 -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1
   cc_params[cc_par_cnt++] = "-D__AFL_HAVE_MANUAL_CONTROL=1";
   cc_params[cc_par_cnt++] = "-D__AFL_COMPILER=1";
   cc_params[cc_par_cnt++] = "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1";
@@ -246,7 +249,23 @@ static void edit_params(u32 argc, char** argv) {
         __asm__ aliasing trick.
 
    */
+  //这里定义了两个宏：__AFL_LOOP、__AFL_INIT()。包含编译器优化的内容
+  /* 
+    去掉编译器优化的部分。
+    #define __AFL_LOOP() \
+  do { \
+      static char *_B; \
+      _B = (char*)"##SIG_AFL_PERSISTENT##"; \
+      __afl_persistent_loop(); \
+  }while (0)
 
+#define __AFL_INIT() \
+  do { \
+      static char *_A;  \
+      _A = (char*)"##SIG_AFL_DEFER_FORKSRV##"; \
+      __afl_manual_init(); \
+  } while (0)
+  */
   cc_params[cc_par_cnt++] = "-D__AFL_LOOP(_A)="
     "({ static volatile char *_B __attribute__((used)); "
     " _B = (char*)\"" PERSIST_SIG "\"; "
@@ -272,18 +291,18 @@ static void edit_params(u32 argc, char** argv) {
     "_I(); } while (0)";
 
   if (maybe_linking) {
-
+    //如果x_set为1，则添加参数-x none
     if (x_set) {
       cc_params[cc_par_cnt++] = "-x";
       cc_params[cc_par_cnt++] = "none";
     }
-
+    //根据bit_mode的值选择afl-llvm-rt
     switch (bit_mode) {
-
+      //如果为0，即没有-m32和-m64选项，就向参数里添加obj_path/afl-llvm-rt.o
       case 0:
         cc_params[cc_par_cnt++] = alloc_printf("%s/afl-llvm-rt.o", obj_path);
         break;
-
+      //如果为32，添加obj_path/afl-llvm-rt-32.o
       case 32:
         cc_params[cc_par_cnt++] = alloc_printf("%s/afl-llvm-rt-32.o", obj_path);
 
@@ -291,7 +310,7 @@ static void edit_params(u32 argc, char** argv) {
           FATAL("-m32 is not supported by your compiler");
 
         break;
-
+      //如果为64，添加obj_path/afl-llvm-rt-64.o
       case 64:
         cc_params[cc_par_cnt++] = alloc_printf("%s/afl-llvm-rt-64.o", obj_path);
 
@@ -344,11 +363,11 @@ int main(int argc, char** argv) {
 
   }
 
-
+  //寻找obj_path路径
   find_obj(argv[0]);
-
+  //编辑参数cc_params
   edit_params(argc, argv);
-
+  //替换进程空间，执行要调用的clang和为其传递参数
   execvp(cc_params[0], (char**)cc_params);
 
   FATAL("Oops, failed to execute '%s' - check your PATH", cc_params[0]);
