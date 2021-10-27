@@ -51,9 +51,9 @@
    It will end up as .comm, so it shouldn't be too wasteful. */
 
 u8  __afl_area_initial[MAP_SIZE];
-u8* __afl_area_ptr = __afl_area_initial;
+u8* __afl_area_ptr = __afl_area_initial;    //存储共享内存的首地址
 
-__thread u32 __afl_prev_loc;
+__thread u32 __afl_prev_loc;    //存储上一个位置，即上一次R(MAP_SIZE)生成的随机数的值
 
 //persistent mode的一些特点：它并不是通过fork出子进程去进行fuzz的，而是认为当前我们正在fuzz的API是无状态的，当API重置后，一个长期活跃的进程就可以被重复使用，这样可以消除重复执行fork函数以及OS相关所需要的开销
 /* Running in persistent mode? */
@@ -74,7 +74,7 @@ static void __afl_map_shm(void) {
   if (id_str) {
 
     u32 shm_id = atoi(id_str);
-
+    //__afl_area_ptr: 存储共享内存的首地址
     __afl_area_ptr = shmat(shm_id, NULL, 0);
 
     /* Whooooops. */
