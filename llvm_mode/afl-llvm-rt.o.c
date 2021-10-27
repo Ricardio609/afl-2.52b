@@ -18,6 +18,7 @@
    This code is the rewrite of afl-as.h's main_payload.
 
 */
+//AFL LLVM_Mode中存在着三个特殊的功能。这三个功能的源码位于afl-llvm-rt.o.c中
 
 #include "../config.h"
 #include "../types.h"
@@ -54,7 +55,7 @@ u8* __afl_area_ptr = __afl_area_initial;
 
 __thread u32 __afl_prev_loc;
 
-
+//persistent mode的一些特点：它并不是通过fork出子进程去进行fuzz的，而是认为当前我们正在fuzz的API是无状态的，当API重置后，一个长期活跃的进程就可以被重复使用，这样可以消除重复执行fork函数以及OS相关所需要的开销
 /* Running in persistent mode? */
 
 static u8 is_persistent;
@@ -96,32 +97,32 @@ static void __afl_start_forkserver(void) {
 
   static u8 tmp[4];
   s32 child_pid;
-
+  //首先设置child_stopped为0，然后通过FORKSRV_FD + 1向状态管道写入4个字节，告知AFL fuzz已经准备好了
   u8  child_stopped = 0;
 
   /* Phone home and tell the parent that we're OK. If parent isn't there,
      assume we're not running in forkserver mode and just execute program. */
 
   if (write(FORKSRV_FD + 1, tmp, 4) != 4) return;
-
+  //然后进入fuzz loop循环
   while (1) {
 
     u32 was_killed;
     int status;
 
     /* Wait for parent by reading from the pipe. Abort if read fails. */
-
+    //通过read从控制管道FORKSRV_FD读取4个字节，如果当前管道中没有内容，就会堵塞在这里，如果读到了，就代表AFL命令我们fork server去执行一次fuzz
     if (read(FORKSRV_FD, &was_killed, 4) != 4) _exit(1);
 
     /* If we stopped the child in persistent mode, but there was a race
        condition and afl-fuzz already issued SIGKILL, write off the old
        process. */
-
+    
     if (child_stopped && was_killed) {
       child_stopped = 0;
       if (waitpid(child_pid, &status, 0) < 0) _exit(1);
     }
-
+    //如果child_stopped为0，则直接fork出一个子进程去进行fuzz
     if (!child_stopped) {
 
       /* Once woken up, create a clone of our process. */
@@ -130,7 +131,7 @@ static void __afl_start_forkserver(void) {
       if (child_pid < 0) _exit(1);
 
       /* In child process: close fds, resume execution. */
-
+      //然后此时对于子进程就会关闭和控制管道和状态管道相关的fd，然后return跳出fuzz loop，恢复正常执行
       if (!child_pid) {
 
         close(FORKSRV_FD);
@@ -139,7 +140,7 @@ static void __afl_start_forkserver(void) {
   
       }
 
-    } else {
+    } else {    //如果child_stopped为1，这是对于persistent mode的特殊处理，此时子进程还活着，只是被暂停了，所以可以通过kill(child_pid, SIGCONT)来简单的重启，然后设置child_stopped为0
 
       /* Special handling for persistent mode: if the child is alive but
          currently stopped, simply restart it with SIGCONT. */
@@ -150,20 +151,20 @@ static void __afl_start_forkserver(void) {
     }
 
     /* In parent process: write PID to pipe, then wait for child. */
-
+    //然后fork server向状态管道FORKSRV_FD + 1写入子进程的pid，然后等待子进程结束，注意这里对于persistent mode，我们会设置waitpid的第三个参数为WUNTRACED，代表若子进程进入暂停状态，则马上返回
     if (write(FORKSRV_FD + 1, &child_pid, 4) != 4) _exit(1);
-
+    
     if (waitpid(child_pid, &status, is_persistent ? WUNTRACED : 0) < 0)
       _exit(1);
 
     /* In persistent mode, the child stops itself with SIGSTOP to indicate
        a successful run. In this case, we want to wake it up without forking
        again. */
-
+    //WIFSTOPPED(status)宏确定返回值是否对应于一个暂停子进程，因为在persistent mode里子进程会通过SIGSTOP信号来暂停自己，并以此指示运行成功，所以在这种情况下，我们需要再进行一次fuzz，就只需要和上面一样，通过SIGCONT信号来唤醒子进程继续执行即可，不需要再进行一次fuzz
     if (WIFSTOPPED(status)) child_stopped = 1;
 
     /* Relay wait status to pipe, then loop back. */
-
+    //当子进程结束以后，向状态管道FORKSRV_FD + 1写入4个字节，通知AFL这次target执行结束了
     if (write(FORKSRV_FD + 1, &status, 4) != 4) _exit(1);
 
   }
@@ -232,24 +233,24 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 void __afl_manual_init(void) {
 
   static u8 init_done;
-
+  //如果还没有被初始化，就初始化共享内存，然后开始执行forkserver，然后设置init_done为1
   if (!init_done) {
 
-    __afl_map_shm();
-    __afl_start_forkserver();
+    __afl_map_shm();            //通过读取环境变量SHM_ENV_VAR来获取共享内存，然后将地址赋值给__afl_area_ptr。否则，默认的__afl_area_ptr指向的是一个数组
+    __afl_start_forkserver();   //
     init_done = 1;
 
   }
 
 }
 
-
+//__attribute__ constructor，代表被此修饰的函数将在main执行之前自动运行
 /* Proper initialization routine. */
 
 __attribute__((constructor(CONST_PRIO))) void __afl_auto_init(void) {
-
+  //读取环境变量PERSIST_ENV_VAR的值，设置给is_persistent
   is_persistent = !!getenv(PERSIST_ENV_VAR);
-
+  //读取环境变量DEFER_ENV_VAR的值，如果为1，就直接返回，这代表__afl_auto_init和deferred instrumentation不通用，这其实道理也很简单，因为deferred instrumentation会自己选择合适的时机，手动init，不需要用这个函数来init，所以这个函数只在没有手动init的时候会自动init
   if (getenv(DEFER_ENV_VAR)) return;
 
   __afl_manual_init();
@@ -291,7 +292,8 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t* start, uint32_t* stop) {
   /* Make sure that the first element in the range is always set - we use that
      to avoid duplicate calls (which can happen as an artifact of the underlying
      implementation in LLVM). */
-
+  //它会从第一个guard开始向后遍历，设置guard指向的值，这个值是通过R(MAP_SIZE)设置的，定义如下，所以如果我们的edge足够多，而MAP_SIZE不够大，就有可能重复，而这个加一是因为我们会把0当成一个特殊的值，其代表对这个edge不进行插桩。
+  //这个init其实很有趣，我们可以打印输出一下stop-start的值，就代表了llvm发现的程序里总计的edge数。
   *(start++) = R(MAP_SIZE - 1) + 1;
 
   while (start < stop) {
