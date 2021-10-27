@@ -136,7 +136,7 @@ static const u8* trampoline_fmt_64 =
   "\n"
   "leaq -(128+24)(%%rsp), %%rsp\n"
   "movq %%rdx,  0(%%rsp)\n"
-  "movq %%rcx,  8(%%rsp)\n"
+  "movq %%rcx,  8(%%rsp)\n"           //只有在mov rcx, xxx这里不同，其xxx的取值就是随机数R(MAP_SIZE),以此来标识与区分每个分支点，然后传入__afl_maybe_log作为第二个参数调用这个函数
   "movq %%rax, 16(%%rsp)\n"
   "movq $0x%08x, %%rcx\n"
   "call __afl_maybe_log\n"
@@ -166,7 +166,7 @@ static const u8* main_payload_32 =
   "\n"
   "  /* Check if SHM region is already mapped. */\n"
   "\n"
-  "  movl  __afl_area_ptr, %edx\n"
+  "  movl  __afl_area_ptr, %edx\n"                    //首先检查_afl_area_ptr是否为0，即是否共享内存已经被设置了。换句话说，只有第一个__afl_maybe_log会执行这个if里的代码
   "  testl %edx, %edx\n"
   "  je    __afl_setup\n"
   "\n"
@@ -203,7 +203,7 @@ static const u8* main_payload_32 =
   "\n"
   "  /* Do not retry setup if we had previous failures. */\n"
   "\n"
-  "  cmpb $0, __afl_setup_failure\n"
+  "  cmpb $0, __afl_setup_failure\n"        //如果_afl_area_ptr为0，即共享内存还没被设置，则判断_afl_setup_failure是否为真，如果为真，则代表setup失败，直接返回
   "  jne  __afl_return\n"
   "\n"
   "  /* Map SHM, jumping to __afl_setup_abort if something goes wrong.\n"
@@ -688,12 +688,12 @@ static const u8* main_payload_64 =
 
 #ifdef __APPLE__
 
-  "  .comm   __afl_area_ptr, 8\n"
+  "  .comm   __afl_area_ptr, 8\n"         //__afl_area_ptr  存储共享内存的首地址
 #ifndef COVERAGE_ONLY
-  "  .comm   __afl_prev_loc, 8\n"
+  "  .comm   __afl_prev_loc, 8\n"         //__afl_prev_loc  存储上一个位置，即上一次R(MAP_SIZE)生成的随机数的值
 #endif /* !COVERAGE_ONLY */
-  "  .comm   __afl_fork_pid, 4\n"
-  "  .comm   __afl_temp, 4\n"
+  "  .comm   __afl_fork_pid, 4\n"         //__afl_fork_pid  存储fork出来的子进程的pid
+  "  .comm   __afl_temp, 4\n"             //__afl_temp      临时buffer
   "  .comm   __afl_setup_failure, 1\n"
 
 #else
