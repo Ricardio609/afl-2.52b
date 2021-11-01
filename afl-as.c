@@ -48,19 +48,19 @@
 #include <sys/wait.h>
 #include <sys/time.h>
 
-static u8** as_params;          /* Parameters passed to the real 'as'   */
+static u8** as_params;          /* Parameters passed to the real 'as'   传递给as的参数*/
 
-static u8*  input_file;         /* Originally specified input file      */
-static u8*  modified_file;      /* Instrumented file for the real 'as'  */
+static u8*  input_file;         /* Originally specified input file      输入文件*/
+static u8*  modified_file;      /* Instrumented file for the real 'as'  as进行插桩处理的文件*/
 
-static u8   be_quiet,           /* Quiet mode (no stderr output)        */
+static u8   be_quiet,           /* Quiet mode (no stderr output)        静默模式，没有标准输出*/
             clang_mode,         /* Running in clang mode?               */
-            pass_thru,          /* Just pass data through?              */
-            just_version,       /* Just show version?                   */
-            sanitizer;          /* Using ASAN / MSAN                    */
+            pass_thru,          /* Just pass data through?              只通过数据*/
+            just_version,       /* Just show version?                   只显示版本*/
+            sanitizer;          /* Using ASAN / MSAN                    是否使用ASAN/MSAN*/
 
-static u32  inst_ratio = 100,   /* Instrumentation probability (%)      */
-            as_par_cnt = 1;     /* Number of params to 'as'             */
+static u32  inst_ratio = 100,   /* Instrumentation probability (%)      插桩覆盖率*/
+            as_par_cnt = 1;     /* Number of params to 'as'             传递给as的参数数量初始值*/
 
 /* If we don't find --32 or --64 in the command line, default to 
    instrumentation for whichever mode we were compiled with. This is not
@@ -88,7 +88,7 @@ static u8   use_64bit = 0;
 //主要是设置变量as_params的值，以及use_64bit/modified_file的值。
 static void edit_params(int argc, char** argv) {
 
-  u8 *tmp_dir = getenv("TMPDIR"), *afl_as = getenv("AFL_AS");   ////读取AFL_AS环境变量，如果存在就设置为afl_as的值
+  u8 *tmp_dir = getenv("TMPDIR"), *afl_as = getenv("AFL_AS");   //读取AFL_AS环境变量，如果存在就设置为afl_as的值
   u32 i;
 
 #ifdef __APPLE__
@@ -107,6 +107,7 @@ static void edit_params(int argc, char** argv) {
      seemingly get away with this by making only very minor tweaks. Thanks
      to Nico Weber for the idea. */
   //因为apple的一些原因，所以如果我们定义了__APPLE__宏，且当前是在clang_mode且没有设置AFL_AS环境变量，就设置use_clang_as为1，并设置afl_as为AFL_CC/AFL_CXX/clang中的一种
+  //对于 __APPLE_ 宏， 如果当前在 clang_mode 且没有设置 AFL_AS 环境变量，会设置 use_clang_mode = 1，并设置 afl-as 为 AFL_CC/AFL_CXX/clang中的一种
   if (clang_mode && !afl_as) {
 
     use_clang_as = 1;
@@ -181,7 +182,7 @@ static void edit_params(int argc, char** argv) {
 
   if (input_file[0] == '-') {
     
-    if (!strcmp(input_file + 1, "-version")) {
+    if (!strcmp(input_file + 1, "-version")) {    //这里就只是做version的查询
       just_version = 1;
       modified_file = input_file;
       goto wrap_things_up;
@@ -245,12 +246,12 @@ static void add_instrumentation(void) {
   outfd = open(modified_file, O_WRONLY | O_EXCL | O_CREAT, 0600);
 
   if (outfd < 0) PFATAL("Unable to write to '%s'", modified_file);
-
+  //验证该文件是否可写，不可写返回异常
   outf = fdopen(outfd, "w");
 
   if (!outf) PFATAL("fdopen() failed");  
   //通过fgets从inf中逐行读取内容保存到line数组里，每行最多读取的字节数是MAX_LINE(8192),这个值包括’\0’,所以
-  //实际读取的有内容的字节数是MAX_LINE-1个字节。从line数组里将读取的内容写入到outf对应的文件里
+  //实际读取的有内容的字节数是MAX_LINE-1个字节。从line数组里将读取的内容写入到outf对应的文件里,，然后进入到真正的插桩逻辑。这里需要注意的是，插桩只向 .text 段插入
   while (fgets(line, MAX_LINE, inf)) {
 
     /* In some cases, we want to defer writing the instrumentation trampoline
@@ -259,13 +260,16 @@ static void add_instrumentation(void) {
        the trampoline now. */
     //接下来是有趣的部分。只在.text部分进行插桩，这部分涉及到多平台以及优化后的汇编文件格式
 
+    //首先跳过标签、宏、注释
     //判断instrument_next和instr_ok是否都为1，以及line是否以\t开始，且line[1]是否是字母
+    //变量 instr_ok 本质上是一个flag，用于表示是否位于.text段。变量设置为1，表示位于 .text 中，如果不为1，则表示不在。于是，如果instr_ok 为1，就会在分支处执行插桩逻辑，否则就不插桩
+
     if (!pass_thru && !skip_intel && !skip_app && !skip_csect && instr_ok &&
         instrument_next && line[0] == '\t' && isalpha(line[1])) {
       //如果都满足，则设置instrument_next = 0,并向outf中写入trampoline_fmt，并将插桩计数器ins_lines加一
       //这其实是因为我们想要插入instrumentation trampoline到所有的标签，宏，注释之后
       fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-              R(MAP_SIZE));
+              R(MAP_SIZE));         //这里对 instr_ok, instrument_next 变量进行了检验是否为1，而且进一步校验是否位于 .text 段中，且设置了 defered mode 进行插桩，则就进行插桩操作，写入 trampoline_fmt_64/32 
 
       instrument_next = 0;
       ins_lines++;
@@ -282,6 +286,7 @@ static void add_instrumentation(void) {
        instrument the .text section. So, let's keep track of that in processed
        files - and let's set instr_ok accordingly. */
     //如果line的值为\t.[text\n|section\t.text|section\t__TEXT,__text|section __TEXT,__text]...其中之一，则设置instr_ok为1，然后跳转到while循环首部，去读取下一行的数据到line数组里
+    //首先判断读入的行是否以‘\t’ 开头，本质上是在匹配.s文件中声明的段，然后判断line[1]是否为.
     if (line[0] == '\t' && line[1] == '.') {
 
       /* OpenBSD puts jump tables directly inline with the code, which is
@@ -289,16 +294,17 @@ static void add_instrumentation(void) {
          around them, so we use that as a signal. */
 
       if (!clang_mode && instr_ok && !strncmp(line + 2, "p2align ", 8) &&
-          isdigit(line[10]) && line[11] == '\n') skip_next_label = 1;
+          isdigit(line[10]) && line[11] == '\n') skip_next_label = 1;         //'\t'开头，且line[1]=='.'，检查是否为 p2align 指令，如果是，则设置 skip_next_label = 1
 
       if (!strncmp(line + 2, "text\n", 5) ||
           !strncmp(line + 2, "section\t.text", 13) ||
           !strncmp(line + 2, "section\t__TEXT,__text", 21) ||
           !strncmp(line + 2, "section __TEXT,__text", 21)) {
-        instr_ok = 1;
+        instr_ok = 1;                                               //尝试匹配 "text\n" "section\t.text" "section\t__TEXT,__text" "section __TEXT,__text" 其中任意一个，匹配成功， 设置 instr_ok = 1， 表示位于 .text 段中，continue 跳出，进行下一次遍历
         continue; 
       }
       //如果不是上面的几种情况，且line的值为\t.[section\t|section |bss\n|data\n]...，则设置instr_ok为0，并跳转到while循环首部，去读取下一行的数据到line数组里
+      //尝试匹配"section\t" "section " "bss\n" "data\n" 其中任意一个，匹配成功，设置 instr_ok = 0，表位于其他段中，continue 跳出，进行下一次遍历
       if (!strncmp(line + 2, "section\t", 8) ||
           !strncmp(line + 2, "section ", 8) ||
           !strncmp(line + 2, "bss\n", 4) ||
@@ -312,6 +318,7 @@ static void add_instrumentation(void) {
     /* Detect off-flavor assembly (rare, happens in gdb). When this is
        encountered, we set skip_csect until the opposite directive is
        seen, and we do not instrument. */
+    //通过几个 if 判断，来设置一些标志信息，包括 off-flavor assembly，Intel/AT&T的块处理方式、ad-hoc __asm__块的处理方式等
 
     if (strstr(line, ".code")) {
 
@@ -335,6 +342,13 @@ static void add_instrumentation(void) {
 
     }
 
+
+    /*
+    AFL在插桩时重点关注的内容包括：^main, ^.L0, ^.LBB0_0, ^\tjnz foo （_main函数， gcc和clang下的分支标记，条件跳转分支标记），这些内容通常标志了程序的流程变化，因此AFL会重点在这些位置进行插桩：
+
+    对于形如\tj[^m].格式的指令，即条件跳转指令，且R(100)产生的随机数小于插桩密度inst_ratio，直接使用fprintf将trampoline_fmt_64(插桩部分的指令)写入 outf 指向的文件，写入大小为小于 MAP_SIZE的随
+    机数——R(MAP_SIZE)，然后插桩计数ins_lines加一，continue 跳出，进行下一次遍历
+    */
     /* If we're in the right mood for instrumenting, check for function
        names or conditional labels. This is a bit messy, but in essence,
        we want to catch:
@@ -384,6 +398,7 @@ static void add_instrumentation(void) {
     /* Label of some sort. This may be a branch destination, but we need to
        tread carefully and account for several different formatting
        conventions. */
+    //对于label的相关评估，有一些label可能是一些分支的目的地，需要自己的评判
 
 #ifdef __APPLE__
 
@@ -433,7 +448,7 @@ static void add_instrumentation(void) {
              .Lfunc_begin0-style exception handling calculations (a problem on
              MacOS X). */
 
-          if (!skip_next_label) instrument_next = 1; else skip_next_label = 0;
+          if (!skip_next_label) instrument_next = 1; else skip_next_label = 0;    //如果结果为真，则设置instrument_next = 1
 
         }
 
@@ -441,13 +456,15 @@ static void add_instrumentation(void) {
 
         /* Function label (always instrumented, deferred mode). */
 
-        instrument_next = 1;
+        instrument_next = 1;    //直接设置instrument_next = 1（defer mode）
     
       }
 
     }
 
   }
+
+  
   //如果插桩计数器ins_lines不为0，就在完全拷贝input_file之后，依据架构，像outf中写入main_payload_64或者main_payload_32，然后关闭这两个文件
   if (ins_lines)
     fputs(use_64bit ? main_payload_64 : main_payload_32, outf);
@@ -478,7 +495,7 @@ int main(int argc, char** argv) {
   s32 pid;
   u32 rand_seed;
   int status;
-  u8* inst_ratio_str = getenv("AFL_INST_RATIO");
+  u8* inst_ratio_str = getenv("AFL_INST_RATIO");    //该环境变量主要控制检测每个分支的概率，取值为0到100%，设置为0时则只检测函数入口的跳转，而不会检测函数分支的跳转
 
   struct timeval tv;
   struct timezone tz;
@@ -505,15 +522,15 @@ int main(int argc, char** argv) {
     exit(1);
 
   }
-
+  //通过 gettimeofday(&tv,&tz);获取时区和时间，然后设置 srandom() 的随机种子 rand_seed = tv.tv_sec ^ tv.tv_usec ^ getpid()
   gettimeofday(&tv, &tz);
 
   rand_seed = tv.tv_sec ^ tv.tv_usec ^ getpid();
 
   srandom(rand_seed); //设置srandom的随机种子
-
+  //调用 edit_params(argc, argv) 函数进行参数处理
   edit_params(argc, argv);
-
+  //检测 inst_ratio_str 的值是否合法范围内，并设置环境变量 AFL_LOOP_ENV_VAR
   if (inst_ratio_str) {
 
     if (sscanf(inst_ratio_str, "%u", &inst_ratio) != 1 || inst_ratio > 100) 
@@ -535,7 +552,14 @@ int main(int argc, char** argv) {
     inst_ratio /= 3;    //这是因为AFL无法在插桩的时候识别出ASAN specific branches，所以会插入很多无意义的桩，为了降低这种概率，粗暴的将整个插桩的概率都除以3
   }
 
-  if (!just_version) add_instrumentation();
+  if (!just_version) add_instrumentation();   //调用 add_instrumentation() 函数，这是实际的插桩函数
+/* 实际执行的参数
+  printf("---------------------------");
+  for(int i = 0; i < sizeof(as_params); i++) {
+    printf("as_params[%d]:%s\n", i, as_params[i]);
+  }
+*/
+
   //fork出一个子进程，让子进程来执行execvp(as_params[0], (char **) as_params);
   if (!(pid = fork())) {
     //execvp执行的时候，会用as_params[0]来完全替换掉当前进程空间中的程序，如果不通过子进程来执行实际的as，那么后续就无法在执行完实际的as之后，还能unlink掉modified_file
@@ -547,7 +571,7 @@ int main(int argc, char** argv) {
   if (pid < 0) PFATAL("fork() failed");
   //等待子进程结束
   if (waitpid(pid, &status, 0) <= 0) PFATAL("waitpid() failed");
-  //读取环境变量AFL_KEEP_ASSEMBLY的值，如果没有设置这个环境变量，就unlink掉modified_file
+  //读取环境变量AFL_KEEP_ASSEMBLY的值，如果没有设置这个环境变量，就unlink掉modified_file（已插桩的文件）。设置该环境变量主要是为了防止 afl-as 删掉插桩后的汇编文件，设置为1则会保留插桩后的汇编文件
   if (!getenv("AFL_KEEP_ASSEMBLY")) unlink(modified_file);
 
   exit(WEXITSTATUS(status));
