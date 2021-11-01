@@ -20,6 +20,15 @@
 
  */
 
+/*
+  该文件的主要作用是通过不断变异测试用例来影响程序的执行路径。
+  
+  在功能上，可以总体上分为3部分：
+    1. 初始配置：进行fuzz环境配置相关工作
+    2. fuzz执行：fuzz的主循环过程
+    3. 变异策略：测试用例的变异过程和方式
+*/
+
 #define AFL_MAIN
 #define MESSAGES_TO_STDOUT
 
@@ -793,7 +802,7 @@ static void mark_as_redundant(struct queue_entry* q, u8 state) {
 //将新的测试用例插入队列，并初始化fname文件名称，增加cur_depth深度++ 
 //queued_paths测试用例数量++，pending_not_fuzzed没被fuzzed测试用例数量++，更新last_path_time = get_cur_time()
 static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
-
+  //通过ck_alloc分配一个 queue_entry 结构体，并进行初始化
   struct queue_entry* q = ck_alloc(sizeof(struct queue_entry));
 
   q->fname        = fname;
@@ -810,8 +819,8 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   } else q_prev100 = queue = queue_top = q;
 
-  queued_paths++;
-  pending_not_fuzzed++;
+  queued_paths++;           // queue计数器加1
+  pending_not_fuzzed++;     // 待fuzz的样例计数器加1
 
   cycles_wo_finds = 0;
 
@@ -1259,7 +1268,8 @@ static void minimize_bits(u8* dst, u8* src) {
    The first step of the process is to maintain a list of top_rated[] entries
    for every byte in the bitmap. We win that slot if there is no previous
    contender, or if the contender has a more favorable speed x size factor. */
-  //每当我们发现一个新的路径，都会调用这个函数来判断其是不是更加地favorable，这个favorable的意思是说是否包含最小的路径集合来遍历到所有bitmap中的位，我们专注于这些集合而忽略其他的
+  //每当我们发现一个新的路径，都会调用这个函数来判断其是不是更加地favorable，这个favorable的意思是说是否包含最小的路径集合来遍历到所有bitmap中的位，我们专注于这些集合而忽略其他的。
+  //以上过程的第一步是为bitmap中的每个字节维护一个 top_rated[] 的列表，这里会计算究竟哪些位置是更“合适”的，该函数主要实现该过程
 static void update_bitmap_score(struct queue_entry* q) {
   //首先计算出这个case的fav_factor，计算方法是q->exec_us * q->len即执行时间和样例大小的乘积，以这两个指标来衡量权重
   u32 i;
@@ -1277,6 +1287,7 @@ static void update_bitmap_score(struct queue_entry* q) {
          /* Faster-executing or smaller test cases are favored. */
         //比较执行时间和样例大小的乘积，哪个更小
          if (fav_factor > top_rated[i]->exec_us * top_rated[i]->len) continue;
+         // 如果top_rated[i]的更小，则代表它的更优，不做处理，继续遍历下一个路径；
 
          /* Looks like we're going to win. Decrease ref count for the
             previous winner, discard its trace_bits[] if necessary. */
@@ -1311,6 +1322,8 @@ static void update_bitmap_score(struct queue_entry* q) {
    until the next run. The favored entries are given more air time during
    all fuzzing steps. */
 //精简队列
+//在前面讨论的关于case的 top_rated 的计算中，还有一个机制是检查所有的 top_rated[] 条目，然后
+//顺序获取之前没有遇到过的byte的对比分数低的“获胜者”进行标记，标记至少会维持到下一次运行之前。在所有的fuzz步骤中，“favorable”的条目会获得更多的执行时间
 static void cull_queue(void) {
 
   struct queue_entry* q;
@@ -1327,7 +1340,7 @@ static void cull_queue(void) {
   pending_favored = 0;
 
   q = queue;
-  //开始遍历queue队列，设置其favored的值都为0
+  //开始遍历queue队列，设置所有的favored的值都为0
   while (q) {
     q->favored = 0;
     q = q->next;
@@ -1363,7 +1376,7 @@ static void cull_queue(void) {
   //遍历queue队列
   while (q) {
     //将queue中冗余的testcase进行标记;如果不是favored的case，就被标记成redundant_edges
-    mark_as_redundant(q, !q->favored);
+    mark_as_redundant(q, !q->favored);       // 位置在/queue/.state/redundent_edges中
     q = q->next;
   }
 
@@ -1371,16 +1384,18 @@ static void cull_queue(void) {
 
 
 /* Configure shared memory and virgin_bits. This is called at startup. */
-
+//该函数用于设置共享内存和 virgin_bits，属于比较重要的函数
+//通过 trace_bits 和 virgin_bits 两个 bitmap 来分别记录当前的 tuple 信息及整体 tuple 信息，其中 trace_bits 位于共享内存上，便于进行进程间通信。
+//通过 virgin_tmout 和 virgin_crash 两个 bitmap 来记录 fuzz 过程中出现的所有目标程序超时以及崩溃的 tuple 信息
 EXP_ST void setup_shm(void) {
 
   u8* shm_str;
-  //将virgin_bits[MAP_SIZE]数组的每个元素置为255（0xff）
+  //如果 in_bitmap 为空，调用 memset将virgin_bits[MAP_SIZE]数组的每个元素置为255（0xff）
   if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);
 
-  memset(virgin_tmout, 255, MAP_SIZE);
-  memset(virgin_crash, 255, MAP_SIZE);
-  //调用shmget分配一块共享内存，将返回的共享内存标识符存到shm_id
+  memset(virgin_tmout, 255, MAP_SIZE);      //调用 memset 初始化数组 virgin_tmout[MAP_SIZE] 的每个元素的值为 ‘255’
+  memset(virgin_crash, 255, MAP_SIZE);      // 调用 memset 初始化数组 virgin_crash[MAP_SIZE] 的每个元素的值为 ‘255’
+  //调用shmget函数分配一块共享内存，将返回的共享内存标识符存到shm_id
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
   /*
     shmget参数
@@ -1405,7 +1420,7 @@ EXP_ST void setup_shm(void) {
      fork server commands. This should be replaced with better auto-detection
      later on, perhaps? */
 
-  if (!dumb_mode) setenv(SHM_ENV_VAR, shm_str, 1);
+  if (!dumb_mode) setenv(SHM_ENV_VAR, shm_str, 1);      // 如果不是dumb_mode，设置环境变量 SHM_ENV_VAR 的值为 shm_str
 
   ck_free(shm_str);
   /*
@@ -1455,7 +1470,7 @@ static void setup_post(void) {
 
 /* Read all testcases from the input directory, then queue them for testing.
    Called at startup. */
-
+//该函数会将 in_dir 目录下的测试用例扫描到 queue 中，并且区分该文件是否为经过确定性变异的input，如果是的话跳过，以节省时间
 static void read_testcases(void) {
 
   struct dirent **nl;
@@ -1532,7 +1547,7 @@ static void read_testcases(void) {
 
     if (!access(dfn, F_OK)) passed_det = 1;
     ck_free(dfn);
-
+    //调用函数 add_to_queue() 将测试用例排成queue队列。该函数会在启动时进行调用
     add_to_queue(fn, st.st_size, passed_det);     //在read_testcases的时候会调用add_to_queue，此时所有的input case的queue depth都会被设置为1。
 
   }
@@ -2027,7 +2042,8 @@ static void destroy_extras(void) {
    In essence, the instrumentation allows us to skip execve(), and just keep
    cloning a stopped child. So, we just execute once, and then send commands
    through a pipe. The other part of this logic is in afl-as.h. */
-//启动APP和它的forkserver
+//该函数主要用于启动APP和它的forkserver
+//AFL的fork server机制避免了多次执行 execve() 函数的多次调用，只需要调用一次然后通过管道发送命令即可
 EXP_ST void init_forkserver(char** argv) {
 
   static struct itimerval it;
@@ -2036,12 +2052,17 @@ EXP_ST void init_forkserver(char** argv) {
   s32 rlen;
 
   ACTF("Spinning up the fork server...");
-  //检查输入输出管道是否存在
+  //检查输入输出管道是否存在。检查 st_pipe 和ctl_pipe，在父子进程间进行管道通信，一个用于传递状态，一个用于传递命令
   if (pipe(st_pipe) || pipe(ctl_pipe)) PFATAL("pipe() failed");
-  //pid=0的话就是fork出来的子进程；！=0的话就是父进程 ,＜0就是fork失败
+  
   forksrv_pid = fork();
+  // fork进程出一个子进程
+  // 如果fork成功，则现在有父子两个进程。pid=0的话就是fork出来的子进程；！=0的话就是父进程 ,＜0就是fork失败
+  // 此时的父进程为fuzzer，子进程则为目标程序进程，也是将来的fork server
+
   //fork失败就打印关键词弹出失败并退出（这里起什么作用？）
   if (forksrv_pid < 0) PFATAL("fork() failed");
+
   //如果是子进程的话，就执行下面
   if (!forksrv_pid) {   //子进程返回0
   
@@ -2089,7 +2110,8 @@ EXP_ST void init_forkserver(char** argv) {
        specified, stdin is /dev/null; otherwise, out_fd is cloned instead. */
     //该函数用于创建一个守护进程。在这个程序里面意思就是让该进程成为这个进程组的组长
     setsid();
-    //dup2函数：复制一个文件的描述符。它们经常用来重定向进程的stdin、stdout和stderr;重定向文件描述符1和2到dev_null_fd
+    //dup2函数：复制一个文件的描述符。它们经常用来重定向进程的stdin、stdout和stderr;
+    //重定向文件描述符1和2到dev_null_fd
     dup2(dev_null_fd, 1);
     dup2(dev_null_fd, 2);
     //如果指定了out_file，则文件描述符0重定向到dev_null_fd，否则重定向到out_fd
@@ -2105,6 +2127,7 @@ EXP_ST void init_forkserver(char** argv) {
     }
 
     /* Set up control and status pipes, close the unneeded original fds. */
+    //// 设置控制和状态管道，关闭不需要的一些文件描述符
     //重定向FORKSRV_FD到ctl_pipe[0],重定向FORKSRV_FD + 1到st_pipe[1]
     //子进程只能读取命令;子进程只能发送(“写出”)状态
     if (dup2(ctl_pipe[0], FORKSRV_FD) < 0) PFATAL("dup2() failed");
@@ -2122,11 +2145,12 @@ EXP_ST void init_forkserver(char** argv) {
 
     /* This should improve performance a bit, since it stops the linker from
        doing extra work post-fork(). */
+    // 如果没有设置延迟绑定，则进行设置，不使用缺省模式
     //读取环境变量LD_BIND_LAZY，如果没有设置，则设置环境变量LD_BIND_NOW为1
     if (!getenv("LD_BIND_LAZY")) setenv("LD_BIND_NOW", "1", 0);
 
     /* Set sane defaults for ASAN if nothing else specified. */
-
+    // 设置环境变量ASAN_OPTIONS，配置ASAN相关
     setenv("ASAN_OPTIONS", "abort_on_error=1:"
                            "detect_leaks=0:"
                            "symbolize=0:"
@@ -2134,7 +2158,7 @@ EXP_ST void init_forkserver(char** argv) {
 
     /* MSAN is tricky, because it doesn't support abort_on_error=1 at this
        point. So, we do this in a very hacky way. */
-
+    // MSAN相关
     setenv("MSAN_OPTIONS", "exit_code=" STRINGIFY(MSAN_ERROR) ":"
                            "symbolize=0:"
                            "abort_on_error=1:"
@@ -2144,7 +2168,9 @@ EXP_ST void init_forkserver(char** argv) {
     //execv会替换掉原有的进程空间为target_path代表的程序，所以相当于后续就是去执行target_path，这个程序结束的话，子进程就结束
     //在这里非常特殊，第一个target会进入__afl_maybe_log里的__afl_fork_wait_loop，并充当fork server，在整个Fuzz的过
     //程中，它都不会结束，每次要Fuzz一次target，都会从这个fork server fork出来一个子进程去fuzz
+    //可以看作：fuzzer -> fork server -> target子进程
     execv(target_path, argv);   
+
     /* Use a distinctive bitmap signature to tell the parent about execv()
        falling through. */
     //此处使用一个EXEC_FAIL_SIG 来告诉父进程执行失败
@@ -2163,7 +2189,7 @@ EXP_ST void init_forkserver(char** argv) {
   fsrv_st_fd  = st_pipe[0];   //父进程只能读取状态
 
   /* Wait for the fork server to come up, but don't wait too long. */
-  //等待fork server启动，但是不能等太久。（所以在调试时要注意这个）
+  //在一定时间内等待fork server启动，但是不能等太久。（所以在调试时要注意这个）
   it.it_value.tv_sec = ((exec_tmout * FORK_WAIT_MULT) / 1000);
   it.it_value.tv_usec = ((exec_tmout * FORK_WAIT_MULT) % 1000) * 1000;
 
@@ -2179,11 +2205,12 @@ EXP_ST void init_forkserver(char** argv) {
   /* If we have a four-byte "hello" message from the server, we're all set.
      Otherwise, try to figure out what went wrong. */
   //fuzzer从server中读取了四个字节的hello ，那么forkserver程序就设置成功了，就结束这个函数并返回。如果没有，接下来的代码就是检查错误
-  if (rlen == 4) {
+  if (rlen == 4) {        // 以读取的结果判断fork server是否成功启动
     OKF("All right - fork server is up.");
     return;
   }
 
+  // 子进程启动失败的异常处理相关
   if (child_timed_out)
     FATAL("Timeout while initializing fork server (adjusting -t may help)");
 
@@ -2616,20 +2643,21 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   if (!from_queue || resuming_fuzz)   
   //如果from_queue是0或者resuming_fuzz被置为1，即代表不来自于queue中或者在resuming sessions的时候，则use_tmout的值被设置的更大
     use_tmout = MAX(exec_tmout + CAL_TMOUT_ADD,
-                    exec_tmout * CAL_TMOUT_PERC / 100);
+                    exec_tmout * CAL_TMOUT_PERC / 100);     // 提升 use_tmout 的值
 
   q->cal_failed++;    //testcase参数q->cal_failed++ 是否校准失败参数++
 
   stage_name = "calibration";   //阶段名称
   //根据是否fast_cal为1，来设置stage_max的值为3还是CAL_CYCLES(默认为8)，含义是每个新测试用例（以及显示出可变行为的测试用例）的校准
   //周期数，也就是说这个stage要执行几次的意思
-  stage_max  = fast_cal ? 3 : CAL_CYCLES; 
+  stage_max  = fast_cal ? 3 : CAL_CYCLES;        // 设置 stage_max，新测试用例的校准周期数
 
   /* Make sure the forkserver is up before we do anything, and let's not
      count its spin-up time toward binary calibration. */
   //判断是否已经启动forkserver ,调用函数init_forkserver()启动fork服务
   if (dumb_mode != 1 && !no_forkserver && !forksrv_pid)
-    init_forkserver(argv);
+    init_forkserver(argv);      // 没有运行在dumb_mode，没有禁用fork server，切forksrv_pid为0时，启动fork server
+  
   //如果这个queue不是来自input文件夹，而是评估新case，则此时q->exec_cksum不为空，拷贝trace_bits到first_trace里，然后
   //计算has_new_bits的值，赋值给new_bits
 
@@ -2677,6 +2705,8 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
         u32 i;
 
         for (i = 0; i < MAP_SIZE; i++) {
+          // 从0到MAP_SIZE进行遍历， first_trace[i] != trace_bits[i]，表示发现了可变queue
+
           //如果first_trace[i]不等于trace_bits[i]，代表发现了可变queue，且var_bytes
           //为空，则将该字节设置为1，并将stage_max设置为CAL_CYCLES_LONG，即需要执行40次
           if (!var_bytes[i] && first_trace[i] != trace_bits[i]) {
@@ -2702,9 +2732,9 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   }
 
   stop_us = get_cur_time_us();
-  //保存所有轮次总的执行时间，加到total_cal_us里，总的执行轮次，加到total_cal_cycles里
-  total_cal_us     += stop_us - start_us; 
-  total_cal_cycles += stage_max;
+  
+  total_cal_us     += stop_us - start_us;     //保存所有轮次总的执行时间，加到total_cal_us里，总的执行轮次，加到total_cal_cycles里
+  total_cal_cycles += stage_max;    // 保存总轮次
 
   /* OK, let's collect some stats about the performance of this test case.
      This is used for fuzzing air time calculations in calculate_score(). */
@@ -2780,11 +2810,11 @@ static void check_map_coverage(void) {
 //执行input文件夹下的预先准备的所有testcase（perform_dry_run），生成初始化的queue和bitmap。这只对初始输入执行一次，所以叫：dry run
 static void perform_dry_run(char** argv) {
 
-  struct queue_entry* q = queue;
+  struct queue_entry* q = queue;      // 创建queue_entry结构体
   u32 cal_failures = 0;
   u8* skip_crashes = getenv("AFL_SKIP_CRASHES");  //读取环境变量AFL_SKIP_CRASHES到skip_crashes,设置cal_failures为0
 
-  while (q) {
+  while (q) {   // 遍历队列
 
     u8* use_mem;
     u8  res;
@@ -2793,18 +2823,18 @@ static void perform_dry_run(char** argv) {
     u8* fn = strrchr(q->fname, '/') + 1;
 
     ACTF("Attempting dry run with '%s'...", fn);
-
+    
     fd = open(q->fname, O_RDONLY);
     if (fd < 0) PFATAL("Unable to open '%s'", q->fname);
 
     use_mem = ck_alloc_nozero(q->len);  
-
+    //读取文件内容到分配的内存中，然后关闭文件
     if (read(fd, use_mem, q->len) != q->len)
-      FATAL("Short read from '%s'", q->fname);
+      FATAL("Short read from '%s'", q->fname);      // 打开q->fname，读取到分配的内存中
 
     close(fd);
 
-    res = calibrate_case(argv, q, use_mem, 0, 1);   //校准该testcase
+    res = calibrate_case(argv, q, use_mem, 0, 1);   //校准testcase
     ck_free(use_mem);
 
     if (stop_soon) return;
@@ -2817,9 +2847,9 @@ static void perform_dry_run(char** argv) {
 
       case FAULT_NONE:
         //如果q是头结点，即第一个测试用例，则check_map_coverage，用以评估map coverage
-        if (q == queue) check_map_coverage();
+        if (q == queue) check_map_coverage();    // 如果为头结点，调用check_map_coverage评估覆盖率
 
-        if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
+        if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);    // 抛出异常
 
         break;
 
@@ -2956,7 +2986,7 @@ static void perform_dry_run(char** argv) {
     //如果这个样例q的var_behavior为真，则代表它多次运行，同样的输入条件下，却出现不同的覆盖信息
     if (q->var_behavior) WARNF("Instrumentation output varies across runs."); //代表这个样例的路径输出可变
 
-    q = q->next;
+    q = q->next;    // 读取下一个queue
 
   }
 
@@ -3423,6 +3453,7 @@ static u32 find_start_position(void) {
    -t given, we don't want to keep auto-scaling the timeout over and over
    again to prevent it from growing due to random flukes. */
 //如果有-t的设置了自己的超时，那么会触发这个函数
+//变量 timeout_given 没有被设置时，会调用到该函数。该函数主要是在没有指定 -t 选项进行 resuming session 时，避免一次次地自动调整超时时间
 static void find_timeout(void) {
 
   static u8 tmp[4096]; /* Ought to be enough for anybody. */
@@ -5029,7 +5060,7 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 /* Take the current entry from the queue, fuzz it for a while. This
    function is a tad too long... returns 0 if fuzzed successfully, 1 if
    skipped or bailed out. */
-
+//从queue中取出entry进行fuzz，成功返回0，跳过或退出的话返回1
 static u8 fuzz_one(char** argv) {
 
   s32 len, fd, temp_len, i, j;
@@ -5050,6 +5081,8 @@ static u8 fuzz_one(char** argv) {
   if (queue_cur->depth > 1) return 1;
 
 #else
+  //根据是否有 pending_favored 和queue_cur的情况，按照概率进行跳过
+  
   //如果pending_favored不为0，则对于queue_cur被fuzz过或者不是favored的，有99%的几率直接返回1
   if (pending_favored) {
 
@@ -6915,7 +6948,7 @@ static void handle_timeout(int sig) {
 /* Do a PATH search and find target binary to see that it exists and
    isn't a shell script - a common and painful mistake. We also check for
    a valid ELF header and for evidence of AFL instrumentation. */
-
+//检查指定路径要执行的程序是否存在，是否为shell脚本，同时检查elf文件头是否合法及程序是否被插桩
 EXP_ST void check_binary(u8* fname) {
 
   u8* env_path = 0;
@@ -7192,18 +7225,18 @@ static void usage(u8* argv0) {
 
 
 /* Prepare output directories and fds. */
-
+//该函数用于准备输出文件夹和文件描述符
 EXP_ST void setup_dirs_fds(void) {
 
   u8* tmp;
   s32 fd;
 
   ACTF("Setting up output directories...");
-
+   /* 如果sync_id，且创建sync_dir文件夹并设置权限为0700，如果报错单errno不是 EEXIST ，抛出异常 */
   if (sync_id && mkdir(sync_dir, 0700) && errno != EEXIST)
       PFATAL("Unable to create '%s'", sync_dir);
-
-  if (mkdir(out_dir, 0700)) {
+  
+  if (mkdir(out_dir, 0700)) {   // 创建out_dir， 权限为0700
 
     if (errno != EEXIST) PFATAL("Unable to create '%s'", out_dir);
 
@@ -7211,10 +7244,10 @@ EXP_ST void setup_dirs_fds(void) {
 
   } else {
 
-    if (in_place_resume)
+    if (in_place_resume)      //创建成功
       FATAL("Resume attempted but old output directory not found");
 
-    out_dir_fd = open(out_dir, O_RDONLY);
+    out_dir_fd = open(out_dir, O_RDONLY);     // 以只读模式打开，返回fd：out_dir_fd
 
 #ifndef __sun
 
@@ -7227,14 +7260,14 @@ EXP_ST void setup_dirs_fds(void) {
 
   /* Queue directory for any starting & discovered paths. */
 
-  tmp = alloc_printf("%s/queue", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  tmp = alloc_printf("%s/queue", out_dir);      
+  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);     // 创建 out_dir/queue 文件夹，权限为0700
   ck_free(tmp);
 
   /* Top-level directory for queue metadata used for session
      resume and related tasks. */
 
-  tmp = alloc_printf("%s/queue/.state/", out_dir);
+  tmp = alloc_printf("%s/queue/.state/", out_dir);      // 创建 out_dir/queue/.state 文件夹，用于保存session resume 和相关tasks的队列元数据
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
   ck_free(tmp);
 
@@ -7332,7 +7365,7 @@ EXP_ST void setup_stdio_file(void) {
 
 
 /* Make sure that core dumps don't go to a program. */
-
+//确保核心转储不会进入程序
 static void check_crash_handling(void) {
 
 #ifdef __APPLE__
@@ -7543,7 +7576,7 @@ static void get_core_count(void) {
 /* Validate and fix up out_dir and sync_dir when using -S. */
 
 static void fix_up_sync(void) {
-
+  //如果通过 -M或者-S指定了 sync_id，则更新 out_dir 和 sync_dir 的值：设置 sync_dir 的值为 out_dir，设置 out_dir 的值为out_dir/sync_id
   u8* x = sync_id;
 
   if (dumb_mode)
@@ -7622,7 +7655,7 @@ static void check_asan_opts(void) {
 
 
 /* Detect @@ in args. */
-
+//识别参数中是否有“@@”，如果有，则替换为 out_dir/.cur_input ，没有则返回
 EXP_ST void detect_file_args(char** argv) {
 
   u32 i = 0;
@@ -7632,7 +7665,7 @@ EXP_ST void detect_file_args(char** argv) {
 
   while (argv[i]) {
 
-    u8* aa_loc = strstr(argv[i], "@@");
+    u8* aa_loc = strstr(argv[i], "@@");       // 查找@@
 
     if (aa_loc) {
 
@@ -7671,7 +7704,7 @@ EXP_ST void detect_file_args(char** argv) {
 /* Set up signal handlers. More complicated that needs to be, because libc on
    Solaris doesn't resume interrupted reads(), sets SA_RESETHAND when you call
    siginterrupt(), and does other stupid things. */
-//设置语句柄(注册必要的信号处理函数)
+//设置语句柄(注册必要的信号处理函数).注册信号处理函数，设置信号句柄
 EXP_ST void setup_signal_handlers(void) {
 
   struct sigaction sa;
@@ -7683,29 +7716,29 @@ EXP_ST void setup_signal_handlers(void) {
   sigemptyset(&sa.sa_mask);
 
   /* Various ways of saying "stop". */
-
+  //SIGHUP/SIGINT/SIGTERM	处理各种“stop”情况
   sa.sa_handler = handle_stop_sig;
   sigaction(SIGHUP, &sa, NULL);
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
 
   /* Exec timeout notifications. */
-
+  //SIGALRM	处理超时的情况
   sa.sa_handler = handle_timeout;
   sigaction(SIGALRM, &sa, NULL);
 
   /* Window resize */
-
+  //SIGWINCH	处理窗口大小
   sa.sa_handler = handle_resize;
   sigaction(SIGWINCH, &sa, NULL);
 
   /* SIGUSR1: skip entry */
-  //USR1:user defined signal 1，留给用户自定义的信号
+  //USR1:user defined signal 1，留给用户自定义的信号，这里定义为skip request
   sa.sa_handler = handle_skipreq;
   sigaction(SIGUSR1, &sa, NULL);
 
   /* Things we don't care about. */
-
+  //SIGSTP/SIGPIPE	不是很重要的一些信号，可以不用关心
   sa.sa_handler = SIG_IGN;
   sigaction(SIGTSTP, &sa, NULL);
   sigaction(SIGPIPE, &sa, NULL);
@@ -8101,7 +8134,7 @@ int main(int argc, char** argv) {
     use_argv = argv + optind;
   
   //主循环前的准备工作
-  perform_dry_run(use_argv);  //afl关键函数,使用初始的测试用例进行测试，确保目标程序能够正常执行,生成初始化的queue和bitmap
+  perform_dry_run(use_argv);  //afl关键函数,执行 input 文件夹下的预先准备的所有测试用例，生成初始化的 queue 和 bitmap，只对初始输入执行一次
 
   //精简队列。对初始队列进行筛选（更新favored entry）。遍历top_rated[]中的queue，然后提取出发现新edge的entry，并标记为favored，
   //使得在下次遍历queue时，这些entry能获得更多执行fuzz的机会
@@ -8112,7 +8145,7 @@ int main(int argc, char** argv) {
   seek_to = find_start_position();  //在恢复时，尝试找到要开始的队列位置。只有在恢复时，以及在可以找到原始fuzzer_stats时，这才有意义。
 
   write_stats_file(0, 0, 0);  //更新一些状态文件
-  save_auto();  //自动更新token，目录/queue/.state/autoextras/auto
+  save_auto();  //自动保存extras，目录/queue/.state/autoextras/auto
 
   if (stop_soon) goto stop_fuzzing;
 
@@ -8131,12 +8164,13 @@ int main(int argc, char** argv) {
 
     cull_queue(); // 对queue进行筛选;精简队列
     //如果queue_cur为空，代表所有queue都被执行完一轮
-    if (!queue_cur) {   //判断queue_cur队列是否为空，如果是，则表示已经完成对队列的遍历，初始化相关参数，重新开始遍历队列
+    if (!queue_cur) {   //判断queue_cur队列是否为空，如果是，则表示已经完成对队列的遍历（所有queue都被执行完一轮），初始化相关参数，重新开始遍历队列
 
-      queue_cycle++;            //代表所有queue被完整执行了多少轮
+      queue_cycle++;            //计数器，代表所有queue被完整执行了多少轮
       current_entry     = 0;    //设置current_entry为0，和queue_cur为queue首元素，开始新一轮fuzz
       cur_skipped_paths = 0;
-      queue_cur         = queue;
+      queue_cur         = queue;    //准备开始新的一轮
+
       //如果是resume fuzz情况，则先检查seek_to是否为空，如果不为空，就从seek_to指定的queue项开始执行
       while (seek_to) {   //找到queue入口的testcase，seek_to = find_start_position()；直接跳到该testcase
         current_entry++;
@@ -8162,7 +8196,7 @@ int main(int argc, char** argv) {
       } else cycles_wo_finds = 0;
 
       prev_queued = queued_paths;
-
+      
       if (sync_id && queue_cycle == 1 && getenv("AFL_IMPORT_FIRST"))
         sync_fuzzers(use_argv);
 
@@ -8178,7 +8212,7 @@ int main(int argc, char** argv) {
 
     //判断是否结束，更新queue_cur和current_entry
     if (!stop_soon && sync_id && !skipped_fuzz) {
-      
+    // 如果skipped_fuzz为0且存在sync_id，表示要进行一次sync
       if (!(sync_interval_cnt++ % SYNC_INTERVAL))
         sync_fuzzers(use_argv);
 
