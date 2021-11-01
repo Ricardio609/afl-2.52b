@@ -30,7 +30,9 @@
    specify its location via AFL_CC or AFL_CXX.
 
  */
-
+/*
+  afl-gcc 的主要作用是实现对于关键节点的代码插桩，属于汇编级，从而记录程序执行路径之类的关键信息，对程序的运行情况进行反馈
+*/
 #define AFL_MAIN
 
 #include "config.h"
@@ -43,11 +45,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-static u8*  as_path;                /* Path to the AFL 'as' wrapper      */
-static u8** cc_params;              /* Parameters passed to the real CC  */
-static u32  cc_par_cnt = 1;         /* Param count, including argv0      */
+static u8*  as_path;                /* Path to the AFL 'as' wrapper      AFL的as路径*/
+static u8** cc_params;              /* Parameters passed to the real CC  CC实际使用的编译器参数*/
+static u32  cc_par_cnt = 1;         /* Param count, including argv0      参数计数*/
 static u8   be_quiet,               /* Quiet mode                        */
-            clang_mode;             /* Invoked as afl-clang*?            */
+            clang_mode;             /* Invoked as afl-clang*?            是否使用afl-clang*模式*/
 
 
 /* Try to find our "fake" GNU assembler in AFL_PATH or at the location derived
@@ -57,7 +59,7 @@ static void find_as(u8* argv0) {
 
   u8 *afl_path = getenv("AFL_PATH");
   u8 *slash, *tmp;
-  //首先检查是否存在AFL_PATH这个路径，如果存在就赋值给as_path,然后检查afl_path_/as这个路径是否可以访问
+  //首先检查是否存在AFL_PATH这个路径（环境变量），如果存在就赋值给as_path,然后检查afl_path_/as这个文件是否可以访问
   if (afl_path) {
 
     tmp = alloc_printf("%s/as", afl_path);
@@ -71,10 +73,11 @@ static void find_as(u8* argv0) {
     ck_free(tmp);
 
   }
-
-  slash = strrchr(argv0, '/');
   //如果不存在AFL_PATH这个环境变量，则检查argv0，例如（”/Users/sakura/gitsource/AFL/cmake-build-debug/afl-gcc”）
   //中是否存在’/‘，如果有就找到最后一个’/‘所在的位置，并取其前面的字符串作为dir，然后检查dir/afl-as这个文件是否可以访问，如果可以访问，就将dir设置为as_path
+  slash = strrchr(argv0, '/');
+  
+ 
   if (slash) {
 
     u8 *dir;
@@ -100,14 +103,14 @@ static void find_as(u8* argv0) {
     as_path = AFL_PATH;
     return;
   }
-
+  //如果以上两种方式都失败，则抛出异常
   FATAL("Unable to find AFL wrapper binary for 'as'. Please set AFL_PATH");
  
 }
 
 
 /* Copy argv to cc_params, making the necessary edits. */
-//这个函数主要是将argv拷贝到u8 **cc_params中，并做必要的编辑
+//这个函数主要是将argv拷贝到u8 **cc_params中，并做必要的处理
 static void edit_params(u32 argc, char** argv) {
 
   u8 fortify_set = 0, asan_set = 0;
@@ -178,10 +181,12 @@ static void edit_params(u32 argc, char** argv) {
 #endif /* __APPLE__ */
 
   }
+
   //遍历从argv[1]开始的argv参数
   while (--argc) {
     u8* cur = *(++argv);
-    //跳过-B/integrated-as/-pipe
+    //跳过-B/integrated-as/-pipe。
+    //-B选项用于设置编译器的搜索路径，直接跳过。（因为在这之前已经处理过as_path了）
     if (!strncmp(cur, "-B", 2)) {
 
       if (!be_quiet) WARNF("-B is already set, overriding");
@@ -198,15 +203,17 @@ static void edit_params(u32 argc, char** argv) {
 #if defined(__FreeBSD__) && defined(__x86_64__)
     if (!strcmp(cur, "-m32")) m32_set = 1;
 #endif
-    //如果存在-fsanitize=address或者-fsanitize=memory，就设置asan_set为1
+    //如果存在-fsanitize=address或者-fsanitize=memory，告诉 gcc 检查内存访问的错误，比如数组越界之类，就设置asan_set为1。
     if (!strcmp(cur, "-fsanitize=address") ||
         !strcmp(cur, "-fsanitize=memory")) asan_set = 1;
     //如果存在FORTIFY_SOURCE，则设置fortify_set为1
+    //FORTIFY_SOURCE 主要进行缓冲区溢出问题的检查，检查的常见函数有memcpy, mempcpy, memmove, memset, strcpy, stpcpy, strncpy, strcat, strncat, sprintf, vsprintf, snprintf, gets 等
     if (strstr(cur, "FORTIFY_SOURCE")) fortify_set = 1;
-
+    //对 cc_params 进行赋值
     cc_params[cc_par_cnt++] = cur;
 
   }
+
   //开始设置其他的cc_params参数
 
   //取之前计算出来的as_path，然后设置-B as_path
@@ -224,15 +231,16 @@ static void edit_params(u32 argc, char** argv) {
       cc_params[cc_par_cnt++] = "-D_FORTIFY_SOURCE=2";
 
   }
+
   //sanitizer
-  ////如果asan_set在上面被设置为1，则使AFL_USE_ASAN环境变量为1
+  //如果asan_set在上面被设置为1，则使AFL_USE_ASAN环境变量为1
   if (asan_set) {
 
     /* Pass this on to afl-as to adjust map density. */
     
     setenv("AFL_USE_ASAN", "1", 1);
 
-  } else if (getenv("AFL_USE_ASAN")) {  //如果存在AFL_USE_ASAN环境变量，则设置-fsanitize=address
+  } else if (getenv("AFL_USE_ASAN")) {  //如果 asan_set 不为1且，存在 AFL_USE_ASAN 环境变量，则设置-U_FORTIFY_SOURCE -fsanitize=address
 
     if (getenv("AFL_USE_MSAN"))   
       FATAL("ASAN and MSAN are mutually exclusive");
@@ -284,7 +292,7 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1";
 
   }
-
+  //如果存在 AFL_NO_BUILTIN 环境变量，则表示允许进行优化
   if (getenv("AFL_NO_BUILTIN")) {
 
     cc_params[cc_par_cnt++] = "-fno-builtin-strcmp";
@@ -296,6 +304,7 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "-fno-builtin-strcasestr";
 
   }
+  
   //终止对cc_params的编辑
   cc_params[cc_par_cnt] = NULL;
 
@@ -330,11 +339,18 @@ int main(int argc, char** argv) {
     exit(1);
 
   }
-  ////查找fake GNU assembler
+  //查找fake GNU assembler
   find_as(argv[0]);
-  // 设置CC的参数
+  // 设置CC的参数；处理传入的编译参数，将确定好的参数放入 cc_params[] 数组
   edit_params(argc, argv);
   // 调用execvp来执行CC
+/* 测试代码，打印参数
+  printf("---------------------------------\n");
+  for(int i = 0; i < sizeof(cc_params); i++) {
+    printf("\tag:%d: %s\n", i, cc_params[i]);
+  }
+  printf("---------------------------------\n");
+*/
   execvp(cc_params[0], (char**)cc_params);
 
   FATAL("Oops, failed to execute '%s' - check your PATH", cc_params[0]);
