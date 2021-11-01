@@ -116,8 +116,8 @@ static const u8* trampoline_fmt_32 =
   "movl %%edx,  4(%%esp)\n"
   "movl %%ecx,  8(%%esp)\n"
   "movl %%eax, 12(%%esp)\n"
-  "movl $0x%08x, %%ecx\n"
-  "call __afl_maybe_log\n"
+  "movl $0x%08x, %%ecx\n"             // 向ecx中存入识别代码块的随机桩代码id
+  "call __afl_maybe_log\n"            //调用__afl_maybe_log函数
   "movl 12(%%esp), %%eax\n"
   "movl  8(%%esp), %%ecx\n"
   "movl  4(%%esp), %%edx\n"
@@ -135,18 +135,19 @@ static const u8* trampoline_fmt_64 =
   ".align 4\n"
   "\n"
   "leaq -(128+24)(%%rsp), %%rsp\n"
-  "movq %%rdx,  0(%%rsp)\n"
+  "movq %%rdx,  0(%%rsp)\n"           //保存rdx、rcx、rax寄存器
   "movq %%rcx,  8(%%rsp)\n"           //只有在mov rcx, xxx这里不同，其xxx的取值就是随机数R(MAP_SIZE),以此来标识与区分每个分支点，然后传入__afl_maybe_log作为第二个参数调用这个函数
-  "movq %%rax, 16(%%rsp)\n"
-  "movq $0x%08x, %%rcx\n"
-  "call __afl_maybe_log\n"
-  "movq 16(%%rsp), %%rax\n"
+  "movq %%rax, 16(%%rsp)\n"     
+  "movq $0x%08x, %%rcx\n"             //64位下使用的寄存器是rcx；将rcx的值设置为fprintf()函数要打印的变量内容
+  "call __afl_maybe_log\n"            //调用__afl_maybe_log函数
+  "movq 16(%%rsp), %%rax\n"           //恢复寄存器
   "movq  8(%%rsp), %%rcx\n"
   "movq  0(%%rsp), %%rdx\n"
   "leaq (128+24)(%%rsp), %%rsp\n"
   "\n"
   "/* --- END --- */\n"
   "\n";
+
 //和forkserver相关
 static const u8* main_payload_32 = 
 
@@ -393,9 +394,9 @@ static const u8* main_payload_64 =
 #if defined(__OpenBSD__)  || (defined(__FreeBSD__) && (__FreeBSD__ < 9))
   "  .byte 0x9f /* lahf */\n"
 #else
-  "  lahf\n"
+  "  lahf\n"   //使用 lahf 指令（加载状态标志位到AH）将EFLAGS寄存器的低八位复制到 AH，被复制的标志位包括：符号标志位（SF）、零标志位（ZF）、辅助进位标志位（AF）、奇偶标志位（PF）和进位标志位（CF），使用该指令可以方便地将标志位副本保存在变量中
 #endif /* ^__OpenBSD__, etc */
-  "  seto  %al\n"
+  "  seto  %al\n"   //使用 seto 指令溢出置位
   "\n"
   "  /* Check if SHM region is already mapped. */\n"
   "\n"
@@ -403,7 +404,7 @@ static const u8* main_payload_64 =
   "  testq %rdx, %rdx\n"
   "  je    __afl_setup\n"
   "\n"
-  "__afl_store:\n"
+  "__afl_store:\n"        //经过两次异或之后，再将 _afl_prev_loc 右移一位作为新的 _afl_prev_loc，最后再共享内存中存储当前插桩位置的地方计数加一
   "\n"
   "  /* Calculate and store hit for the code location specified in rcx. */\n"
   "\n"
@@ -431,7 +432,7 @@ static const u8* main_payload_64 =
   "\n"
   ".align 8\n"
   "\n"
-  "__afl_setup:\n"
+  "__afl_setup:\n"          //该部分的主要作用为初始化 __afl_area_ptr ，且只在运行到第一个桩时进行本次初始化
   "\n"
   "  /* Do not retry setup if we had previous failures. */\n"
   "\n"
@@ -446,10 +447,10 @@ static const u8* main_payload_64 =
 #else
   "  movq  __afl_global_area_ptr(%rip), %rdx\n"
 #endif /* !^__APPLE__ */
-  "  testq %rdx, %rdx\n"
+  "  testq %rdx, %rdx\n"      //检查 __afl_global_area_ptr 文件指针是否为NULL
   "  je    __afl_setup_first\n"
   "\n"
-  "  movq %rdx, __afl_area_ptr(%rip)\n"
+  "  movq %rdx, __afl_area_ptr(%rip)\n"   //如果不为NULL，将 __afl_global_area_ptr 的值赋给 __afl_area_ptr，然后跳转到 __afl_store
   "  jmp  __afl_store\n" 
   "\n"
   "__afl_setup_first:\n"
@@ -459,7 +460,7 @@ static const u8* main_payload_64 =
   "\n"
   "  leaq -352(%rsp), %rsp\n"
   "\n"
-  "  movq %rax,   0(%rsp)\n"
+  "  movq %rax,   0(%rsp)\n"    //保存所有寄存器的值，包括 xmm 寄存器组
   "  movq %rcx,   8(%rsp)\n"
   "  movq %rdi,  16(%rsp)\n"
   "  movq %rsi,  32(%rsp)\n"
@@ -489,17 +490,17 @@ static const u8* main_payload_64 =
   "\n"
   "  /* The 64-bit ABI requires 16-byte stack alignment. We'll keep the\n"
   "     original stack ptr in the callee-saved r12. */\n"
-  "\n"
+  "\n"                                                                //进行 rsp 的对齐
   "  pushq %r12\n"
   "  movq  %rsp, %r12\n"
   "  subq  $16, %rsp\n"
   "  andq  $0xfffffffffffffff0, %rsp\n"
   "\n"
-  "  leaq .AFL_SHM_ENV(%rip), %rdi\n"
+  "  leaq .AFL_SHM_ENV(%rip), %rdi\n"         //获取环境变量 __AFL_SHM_ID，该环境变量保存的是共享内存的ID
   CALL_L64("getenv")
   "\n"
   "  testq %rax, %rax\n"
-  "  je    __afl_setup_abort\n"
+  "  je    __afl_setup_abort\n"               //如果获取成功，调用 _shmat ，启用对共享内存的访问；如果启用失败跳转到 __afl_setup_abort
   "\n"
   "  movq  %rax, %rdi\n"
   CALL_L64("atoi")
@@ -512,7 +513,7 @@ static const u8* main_payload_64 =
   "  cmpq $-1, %rax\n"
   "  je   __afl_setup_abort\n"
   "\n"
-  "  /* Store the address of the SHM region. */\n"
+  "  /* Store the address of the SHM region. */\n"      //将 _shmat 返回的共享内存地址存储在 __afl_area_ptr 和 __afl_global_area_ptr 变量中
   "\n"
   "  movq %rax, %rdx\n"
   "  movq %rax, __afl_area_ptr(%rip)\n"
@@ -525,7 +526,7 @@ static const u8* main_payload_64 =
 #endif /* ^__APPLE__ */
   "  movq %rax, %rdx\n"
   "\n"
-  "__afl_forkserver:\n"
+  "__afl_forkserver:\n"             //这一段实现的主要功能是向 FORKSRV_FD+1 （也就是198+1）号描述符（即状态管道）中写 __afl_temp 中的4个字节，告诉 fork server 已经成功启动
   "\n"
   "  /* Enter the fork server mode to avoid the overhead of execve() calls. We\n"
   "     push rdx (area ptr) twice to keep stack alignment neat. */\n"
@@ -548,7 +549,7 @@ static const u8* main_payload_64 =
   "\n"
   "__afl_fork_wait_loop:\n"
   "\n"
-  "  /* Wait for parent by reading from the pipe. Abort if read fails. */\n"
+  "  /* Wait for parent by reading from the pipe. Abort if read fails. */\n"      //等待fuzzer通过控制管道发送过来的命令，读入到 __afl_temp 中
   "\n"
   "  movq $4, %rdx               /* length    */\n"
   "  leaq __afl_temp(%rip), %rsi /* data      */\n"
@@ -565,7 +566,7 @@ static const u8* main_payload_64 =
   CALL_L64("fork")
   "  cmpq $0, %rax\n"
   "  jl   __afl_die\n"
-  "  je   __afl_fork_resume\n"
+  "  je   __afl_fork_resume\n"      //子进程执行 __afl_fork_resume
   "\n"
   "  /* In parent process: write PID to pipe, then wait for child. */\n"
   "\n"
@@ -578,8 +579,8 @@ static const u8* main_payload_64 =
   "\n"
   "  movq $0, %rdx                   /* no flags  */\n"
   "  leaq __afl_temp(%rip), %rsi     /* status    */\n"
-  "  movq __afl_fork_pid(%rip), %rdi /* PID       */\n"
-  CALL_L64("waitpid")
+  "  movq __afl_fork_pid(%rip), %rdi /* PID       */\n"     //将子进程的pid赋给 __afl_fork_pid，并写到状态管道中通知父进程
+  CALL_L64("waitpid")       //等待子进程执行完成，写入状态管道告知 fuzzer
   "  cmpq $0, %rax\n"
   "  jle  __afl_die\n"
   "\n"
@@ -590,11 +591,11 @@ static const u8* main_payload_64 =
   "  movq $" STRINGIFY((FORKSRV_FD + 1)) ", %rdi         /* file desc */\n"
   CALL_L64("write")
   "\n"
-  "  jmp  __afl_fork_wait_loop\n"
+  "  jmp  __afl_fork_wait_loop\n"     //重新执行下一轮 __afl_fork_wait_loop
   "\n"
   "__afl_fork_resume:\n"
   "\n"
-  "  /* In child process: close fds, resume execution. */\n"
+  "  /* In child process: close fds, resume execution. */\n"      //关闭子进程中的fd，恢复子进程的寄存器状态
   "\n"
   "  movq $" STRINGIFY(FORKSRV_FD) ", %rdi\n"
   CALL_L64("close")
@@ -636,7 +637,7 @@ static const u8* main_payload_64 =
   "\n"
   "  leaq 352(%rsp), %rsp\n"
   "\n"
-  "  jmp  __afl_store\n"
+  "  jmp  __afl_store\n"          //跳转到 __afl_store 执行
   "\n"
   "__afl_die:\n"
   "\n"
@@ -704,11 +705,11 @@ static const u8* main_payload_64 =
 #endif /* !COVERAGE_ONLY */
   "  .lcomm   __afl_fork_pid, 4\n"
   "  .lcomm   __afl_temp, 4\n"
-  "  .lcomm   __afl_setup_failure, 1\n"
+  "  .lcomm   __afl_setup_failure, 1\n"      //标志位，如果置位则直接退出
 
 #endif /* ^__APPLE__ */
 
-  "  .comm    __afl_global_area_ptr, 8, 8\n"
+  "  .comm    __afl_global_area_ptr, 8, 8\n"   //全局指针
   "\n"
   ".AFL_SHM_ENV:\n"
   "  .asciz \"" SHM_ENV_VAR "\"\n"
