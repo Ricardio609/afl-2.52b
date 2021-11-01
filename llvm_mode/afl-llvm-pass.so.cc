@@ -21,7 +21,12 @@
    in ../afl-as.h.
 
  */
+/*
+  llvm_mode 的插桩思路就是通过编写pass来实现信息记录，对每个基本块都插入探针，具体代码在 afl-llvm-pass.so.cc 文件中，初始化和forkserver操作通过链接完成.
 
+  主要是当通过 afl-clang-fast 调用 clang 时，这个pass被插入到 LLVM 中，告诉编译器添加与 `afl-as.h 中大致等效的代码.
+  afl-llvm-pass.so.cc 文件实现了 LLVM-mode 下的一个插桩 LLVM Pass
+*/
 #define AFL_LLVM_PASS
 
 #include "../config.h"
@@ -43,7 +48,7 @@ using namespace llvm;
 //llvm的层次关系，粗略理解就是Module相当于你的程序，里面包含所有Function和全局变量，而Function里包含所有BasicBlock和函数参数，BasicBlock里包含所有Instruction,Instruction包含Opcode和Operands
 
 namespace {
-  //transformer pass AFLCoverage 
+  //transformer pass: AFLCoveragee，继承自 ModulePass，实现了一个 runOnModule 函数(该函数中点分析)
   class AFLCoverage : public ModulePass {
 
     public:
@@ -64,9 +69,9 @@ namespace {
 
 char AFLCoverage::ID = 0;
 
-
+//该文件的关键函数
 bool AFLCoverage::runOnModule(Module &M) {
-  //通过getContext来获取LLVMContext，其保存了整个程序里分配的类型和常量信息
+  //通过getContext来获取LLVMContext，其保存了整个程序里分配的类型和常量信息（进程上下文）
   LLVMContext &C = M.getContext();
   //通过这个Context来获取type实例Int8Ty和Int32Ty
   //Type是所有type类的一个超类。每个Value都有一个Type，所以这经常被用于寻找指定类型的Value。Type不能直接实例化，只能通过其子类实例化。
@@ -88,6 +93,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   /* Decide instrumentation ratio */
   //读取环境变量AFL_INST_RATIO给变量inst_ratio，其值默认为100，这个值代表一个插桩概率，本来应该每个分支都必定插桩，而这是一个随机的概率决定是否要在这个分支插桩
+  //设置插桩密度：读取环境变量 AFL_INST_RATIO ，并赋值给 inst_ratio，其值默认为100，范围为 1～100，该值表示插桩概率
   char* inst_ratio_str = getenv("AFL_INST_RATIO");
   unsigned int inst_ratio = 100;
 
@@ -101,7 +107,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   /* Get globals for the SHM region and the previous location. Note that
      __afl_prev_loc is thread-local. */
-  //获取全局变量中指向共享内存的指针，以及上一个基础块的编号
+  //获取全局变量中指向共享内存的指针，以及上一个基础块的随机编号
   GlobalVariable *AFLMapPtr =
       new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
                          GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
@@ -117,20 +123,20 @@ bool AFLCoverage::runOnModule(Module &M) {
   for (auto &F : M)
     for (auto &BB : F) {
 
-      BasicBlock::iterator IP = BB.getFirstInsertionPt();
+      BasicBlock::iterator IP = BB.getFirstInsertionPt();  
       IRBuilder<> IRB(&(*IP));
 
-      if (AFL_R(100) >= inst_ratio) continue;
+      if (AFL_R(100) >= inst_ratio) continue;     //如果大于插桩密度，进行随机插桩
 
       /* Make up cur_loc */
       //随机创建一个当前基本块的编号，并通过插入load指令来获取前一个基本块的编号
       unsigned int cur_loc = AFL_R(MAP_SIZE);
 
-      ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+      ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);     //随机创建当前基本块ID
 
       /* Load prev_loc */
 
-      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);             // 获取上一个基本块的随机ID
       PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
 
@@ -139,7 +145,7 @@ bool AFLCoverage::runOnModule(Module &M) {
       LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *MapPtrIdx =
-          IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+          IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));        //调用 CreateGEP 函数获取共享内存中指定index的地址
 
       /* Update bitmap */
       //通过插入load指令来读取对应index地址的值，并通过插入add指令来将其加一，然后通过创建store指令将新值写入，更新共享内存
@@ -155,12 +161,12 @@ bool AFLCoverage::runOnModule(Module &M) {
           IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
       Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
-      inst_blocks++;
+      inst_blocks++;    //插桩计数加一
 
     }
 
   /* Say something nice. */
-
+  //扫描下一个BB，根据设置是否为quiet模式等，并判断 inst_blocks 是否为0，如果为0则说明没有进行插桩
   if (!be_quiet) {
 
     if (!inst_blocks) WARNF("No instrumentation targets found.");
@@ -183,7 +189,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   prev_location = cur_location >> 1;
 */
 
-//注册pass
+//注册pass。对pass进行注册，其核心功能为向PassManager注册新的pass，每个pass相互独立
 //这些都是向PassManager来注册新的pass，每个pass彼此独立，通过PM统一注册和调度，更加模块化
 static void registerAFLPass(const PassManagerBuilder &,
                             legacy::PassManagerBase &PM) {

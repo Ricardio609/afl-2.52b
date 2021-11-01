@@ -20,6 +20,9 @@
    of flags, and then calls the real compiler.
 
  */
+ /*
+  本质上是 clang 的 wrapper，最终调用的还是 clang 。但是与 afl-gcc 一样，会进行一些参数处理
+ */
 
 #define AFL_MAIN
 
@@ -39,7 +42,7 @@ static u32  cc_par_cnt = 1;         /* Param count, including argv0      */
 
 
 /* Try to find the runtime libraries. If that fails, abort. */
-
+//查找运行时library.函数的主要功能是在寻找AFL的路径以找到 afl-llvm-rt.o 文件，该文件即为要用到的运行时库
 static void find_obj(u8* argv0) {
   //获取环境变量AFL_PATH的值，如果存在，就去读取AFL_PATH/afl-llvm-rt.o是否可以访问，如果可以就设置这个目录为obj_path，然后直接返回
   u8 *afl_path = getenv("AFL_PATH");
@@ -94,7 +97,7 @@ static void find_obj(u8* argv0) {
 
 
 /* Copy argv to cc_params, making the necessary edits. */
-
+//处理传入的编译参数，将确定好的参数放入 cc_params[] 数组
 static void edit_params(u32 argc, char** argv) {
 
   u8 fortify_set = 0, asan_set = 0, x_set = 0, maybe_linking = 1, bit_mode = 0;
@@ -132,6 +135,10 @@ static void edit_params(u32 argc, char** argv) {
   cc_params[cc_par_cnt++] = "-Xclang";
   cc_params[cc_par_cnt++] = alloc_printf("%s/afl-llvm-pass.so", obj_path);
 #endif /* ^USE_TRACE_PC */
+/*
+  这里涉及到llvm_mode使用的2种插桩方式：默认使用的是传统模式，使用 afl-llvm-pass.so 注入来进行插桩，这种方式较为稳定；另外一种是处于实验阶段的方式——trace-pc-guard 模式
+*/
+
 
   cc_params[cc_par_cnt++] = "-Qunused-arguments";
 
@@ -249,7 +256,7 @@ static void edit_params(u32 argc, char** argv) {
         __asm__ aliasing trick.
 
    */
-  //这里定义了两个宏：__AFL_LOOP、__AFL_INIT()。包含编译器优化的内容
+  //这里定义了两个宏：__AFL_LOOP、__AFL_INIT()，在afl-llvm-rt.o.c中有定义。包含编译器优化的内容
   /* 
     去掉编译器优化的部分。
     #define __AFL_LOOP() \

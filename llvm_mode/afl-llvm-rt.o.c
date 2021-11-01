@@ -18,7 +18,10 @@
    This code is the rewrite of afl-as.h's main_payload.
 
 */
-//AFL LLVM_Mode中存在着三个特殊的功能。这三个功能的源码位于afl-llvm-rt.o.c中
+/*
+  主要是重写了 afl-as.h 文件中的 main_payload 部分，方便调用
+*/
+//AFL LLVM_Mode中存在着三个特殊的功能：deferred instrumentation, persistent mode,trace-pc-guard mode。这三个功能的源码位于afl-llvm-rt.o.c中
 
 #include "../config.h"
 #include "../types.h"
@@ -64,27 +67,27 @@ static u8 is_persistent;
 /* SHM setup. */
 
 static void __afl_map_shm(void) {
-
-  u8 *id_str = getenv(SHM_ENV_VAR);
+  //通过读取环境变量SHM_ENV_VAR来获取共享内存，然后将地址赋值给__afl_area_ptr。否则，默认的__afl_area_ptr指向的是一个数组
+  u8 *id_str = getenv(SHM_ENV_VAR);      // 读取环境变量 SHM_ENV_VAR 获取id
 
   /* If we're running under AFL, attach to the appropriate region, replacing the
      early-stage __afl_area_initial region that is needed to allow some really
      hacky .init code to work correctly in projects such as OpenSSL. */
 
-  if (id_str) {
+  if (id_str) {   // 成功读取id
 
     u32 shm_id = atoi(id_str);
     //__afl_area_ptr: 存储共享内存的首地址
-    __afl_area_ptr = shmat(shm_id, NULL, 0);
+    __afl_area_ptr = shmat(shm_id, NULL, 0);      // 获取shm地址，赋给 __afl_area_ptr
 
     /* Whooooops. */
 
-    if (__afl_area_ptr == (void *)-1) _exit(1);
+    if (__afl_area_ptr == (void *)-1) _exit(1);     // 异常则退出
 
     /* Write something into the bitmap so that even with low AFL_INST_RATIO,
        our parent doesn't give up on us. */
 
-    __afl_area_ptr[0] = 1;
+    __afl_area_ptr[0] = 1;      // 进行设置
 
   }
 
@@ -112,12 +115,13 @@ static void __afl_start_forkserver(void) {
 
     /* Wait for parent by reading from the pipe. Abort if read fails. */
     //通过read从控制管道FORKSRV_FD读取4个字节，如果当前管道中没有内容，就会堵塞在这里，如果读到了，就代表AFL命令我们fork server去执行一次fuzz
+    //调用 read 从控制管道读取4字节，判断子进程是否超时。如果管道内读取失败，发生阻塞，读取成功则表示AFL指示forkserver执行fuzz
     if (read(FORKSRV_FD, &was_killed, 4) != 4) _exit(1);
 
     /* If we stopped the child in persistent mode, but there was a race
        condition and afl-fuzz already issued SIGKILL, write off the old
        process. */
-    
+    // 处于persistent mode且子进程已被killed
     if (child_stopped && was_killed) {
       child_stopped = 0;
       if (waitpid(child_pid, &status, 0) < 0) _exit(1);
@@ -127,14 +131,14 @@ static void __afl_start_forkserver(void) {
 
       /* Once woken up, create a clone of our process. */
 
-      child_pid = fork();
+      child_pid = fork();     //重新fork
       if (child_pid < 0) _exit(1);
 
       /* In child process: close fds, resume execution. */
       //然后此时对于子进程就会关闭和控制管道和状态管道相关的fd，然后return跳出fuzz loop，恢复正常执行
       if (!child_pid) {
 
-        close(FORKSRV_FD);
+        close(FORKSRV_FD);      //关闭fd
         close(FORKSRV_FD + 1);
         return;
   
@@ -178,14 +182,14 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
   static u8  first_pass = 1;
   static u32 cycle_cnt;
-
+  //首先判读是否为第一次执行循环，如果是第一次
   if (first_pass) {
 
     /* Make sure that every iteration of __AFL_LOOP() starts with a clean slate.
        On subsequent calls, the parent will take care of that, but on the first
        iteration, it's our job to erase any trace of whatever happened
        before the loop. */
-
+    //如果 is_persistent 为1，清空 __afl_area_ptr，设置 __afl_area_ptr[0] 为1，__afl_prev_loc 为0
     if (is_persistent) {
 
       memset(__afl_area_ptr, 0, MAP_SIZE);
@@ -197,20 +201,20 @@ int __afl_persistent_loop(unsigned int max_cnt) {
     first_pass = 0;
     return 1;
 
-  }
-
+  } 
+  //如果不是第一次执行循环，在 persistent mode 下，且 --cycle_cnt 大于1
   if (is_persistent) {
 
     if (--cycle_cnt) {
 
-      raise(SIGSTOP);
+      raise(SIGSTOP);           //发出信号 SIGSTOP 让当前进程暂停
 
       __afl_area_ptr[0] = 1;
       __afl_prev_loc = 0;
 
       return 1;
 
-    } else {
+    } else {        //如果 cycle_cnt 为0，设置__afl_area_ptr指向数组 __afl_area_initial
 
       /* When exiting __AFL_LOOP(), make sure that the subsequent code that
          follows the loop is not traced. We do that by pivoting back to the
@@ -236,8 +240,8 @@ void __afl_manual_init(void) {
   //如果还没有被初始化，就初始化共享内存，然后开始执行forkserver，然后设置init_done为1
   if (!init_done) {
 
-    __afl_map_shm();            //通过读取环境变量SHM_ENV_VAR来获取共享内存，然后将地址赋值给__afl_area_ptr。否则，默认的__afl_area_ptr指向的是一个数组
-    __afl_start_forkserver();   //
+    __afl_map_shm();            
+    __afl_start_forkserver();   
     init_done = 1;
 
   }
@@ -264,7 +268,7 @@ __attribute__((constructor(CONST_PRIO))) void __afl_auto_init(void) {
 
    The first function (__sanitizer_cov_trace_pc_guard) is called back on every
    edge (as opposed to every basic block). */
-
+//在每个edge插入桩代码，函数 __sanitizer_cov_trace_pc_guard 会在每个edge进行调用，该函数利用函数参数 guard 指针所指向的 uint32 值来确定共享内存上所对应的地址
 void __sanitizer_cov_trace_pc_guard(uint32_t* guard) {
   __afl_area_ptr[*guard]++;
 }
@@ -273,7 +277,7 @@ void __sanitizer_cov_trace_pc_guard(uint32_t* guard) {
 /* Init callback. Populates instrumentation IDs. Note that we're using
    ID of 0 as a special value to indicate non-instrumented bits. That may
    still touch the bitmap, but in a fairly harmless way. */
-
+//guard 的初始化
 void __sanitizer_cov_trace_pc_guard_init(uint32_t* start, uint32_t* stop) {
 
   u32 inst_ratio = 100;
@@ -296,7 +300,7 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t* start, uint32_t* stop) {
   //这个init其实很有趣，我们可以打印输出一下stop-start的值，就代表了llvm发现的程序里总计的edge数。
   *(start++) = R(MAP_SIZE - 1) + 1;
 
-  while (start < stop) {
+  while (start < stop) {      //这里如果计算stop-start，就是程序里总计的edge数
 
     if (R(100) < inst_ratio) *start = R(MAP_SIZE - 1) + 1;
     else *start = 0;
