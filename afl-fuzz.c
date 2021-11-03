@@ -126,7 +126,7 @@ static u32 stats_update_freq = 1;     /* Stats update frequency (execs)   */
 EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            force_deterministic,       /* Force deterministic stages?      */
            use_splicing,              /* Recombine input files?           */
-           dumb_mode,                 /* Run in non-instrumented mode?    */
+           dumb_mode,                 /* Run in non-instrumented mode?    dumb mode:盲目变异，不插桩。非dumb mode（-d）*/
            score_changed,             /* Scoring for favorites changed?   */
            kill_signal,               /* Signal that killed the child     */
            resuming_fuzz,             /* Resuming an older fuzzing job?   */
