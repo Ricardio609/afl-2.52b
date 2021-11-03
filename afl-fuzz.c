@@ -1139,7 +1139,7 @@ static void simplify_trace(u32* mem) {
 /* Destructively classify execution counts in a trace. This is used as a
    preprocessing step for any newly acquired traces. Called on every exec,
    must be fast. */
-
+//count_class_lookup8中对于执行次数进行了规整，比如执行了4-7次的其计数为8，比如32次到127次都会认为是64次
 static const u8 count_class_lookup8[256] = {
 
   [0]           = 0,
@@ -1156,6 +1156,14 @@ static const u8 count_class_lookup8[256] = {
 
 static u16 count_class_lookup16[65536];
 
+//该函数用来初始化 u16 count_class_lookup16[65536]这个数组。
+//将整个 count_class_lookup16 分成256段，每一段256份儿。初始化的时候利用了 count_class_lookup8。
+/*
+  变量 trace_bits来记录分支执行次数，而count_class_lookup8实际就是对于trace_bits的规整。
+  而初始化 count_class_lookup16 实际是因为 AFL 中对于一条分支径的表示是由一个二元组来表示的。
+  例如：A->B->C->D->A-B， 可以用[A,B] [B,C] [C,D] [D,A]四个二元组表示，只需要记录跳转的源地址和目标地址。并且[A,B]执行了两次，其余执行了一次，这里用hash映射在一张map中。
+  而基于这种二元组的表示的效率考虑，又使用了u16 count_class_lookup16[65536] 这个数组，并在此初始化。
+*/
 
 EXP_ST void init_count_class16(void) {
 
@@ -1165,7 +1173,7 @@ EXP_ST void init_count_class16(void) {
     for (b2 = 0; b2 < 256; b2++)
       count_class_lookup16[(b1 << 8) + b2] = 
         (count_class_lookup8[b1] << 8) |
-        count_class_lookup8[b2];
+        count_class_lookup8[b2];                //count_class_lookup8中对于执行次数进行了规整，比如执行了4-7次的其计数为8，比如32次到127次都会认为是64次
 
 }
 
