@@ -158,12 +158,12 @@ static s32 out_fd,                    /* Persistent fd for out_file       */
 static s32 forksrv_pid,               /* PID of the fork server           */
            child_pid = -1,            /* PID of the fuzzed program        */
            out_dir_fd = -1;           /* FD of the lock file              */
+//AFL是根据二元tuple(跳转的源地址和目标地址)来记录分支信息，从而获取target的执行流程和代码覆盖情况.tuple信息：目标程序执行路径
+EXP_ST u8* trace_bits;                /* SHM with instrumentation bitmap  记录当前的tuple信息*/
 
-EXP_ST u8* trace_bits;                /* SHM with instrumentation bitmap  */
-
-EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
-           virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
-           virgin_crash[MAP_SIZE];    /* Bits we haven't seen in crashes  */
+EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing 记录总的tuple信息*/
+           virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   记录fuzz过程中出现的所有目标程序的timeout时的tuple信息*/
+           virgin_crash[MAP_SIZE];    /* Bits we haven't seen in crashes  记录fuzz过程中出现的crash时的tuple信息*/
 
 static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
@@ -5061,6 +5061,13 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
    function is a tad too long... returns 0 if fuzzed successfully, 1 if
    skipped or bailed out. */
 //从queue中取出entry进行fuzz，成功返回0，跳过或退出的话返回1
+/*
+  bitflip、arithmetic、interest、dictionary 是 deterministic fuzzing 过程，属于dumb mode(-d) 和主 fuzzer(-M) 会进行的操作； havoc、splice 与前面不同是存在随机性，是
+  所有fuzz都会进行的变异操作。文件变异是具有启发性判断的，应注意“避免浪费，减少消耗”的原则，即之前变异应该尽可能产生更大的效果，比如 eff_map 数组的设计；同时减少不必要的资源
+  消耗，变异可能没啥好效果的话要及时止损。
+*/
+//一次变异是指一个比特的改变也算变异，根据编译策略，经过很多次变异之后，fuzz_one结束叫做一轮变异。
+
 static u8 fuzz_one(char** argv) {
 
   s32 len, fd, temp_len, i, j;
@@ -5247,7 +5254,10 @@ static u8 fuzz_one(char** argv) {
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
     FLIP_BIT(out_buf, stage_cur);
-
+    
+    //在进行为翻转的时候，程序会随时注意翻转之后的变化。比如说，对于一段 xxxxxxxxIHDRxxxxxxxx 的
+    //文件字符串，当改变 IHDR 任意一个都会导致奇怪的变化，这个时候，程序就会认为 IHDR 是一个可以让fuzzer很激动的“神仙值”--token
+    //其实token的长度和数量都是可以控制的，在 config.h 中有定义，但是因为是在头文件宏定义的，修改之后需要重新编译使用。
     /* While flipping the least significant bit in every byte, pull of an extra
        trick to detect possible syntax tokens. In essence, the idea is that if
        you have a binary blob like this:
@@ -5393,6 +5403,53 @@ static u8 fuzz_one(char** argv) {
 //这样做的逻辑是：如果一个byte完全翻转，都无法带来执行路径的变化，那么这个byte很有可能是属于”data”，而非”metadata”（例如size, flag等），对整个fuzzing的意义不大。所以，在随后的一些变异中，会参考effector map，跳过那些“无效”的byte，从而节省了执行资源
 //由此，通过极小的开销（没有增加额外的执行次数），AFL又一次对文件格式进行了启发式的判断。看到这里，不得不叹服于AFL实现上的精妙。
 //不过，在某些情况下并不会检测有效字符。第一种情况就是dumb mode或者从fuzzer，此时文件所有的字符都有可能被变异。第二、第三种情况与文件本身有关
+/*
+  为什么是 8/8 的时候出现？因为 8bit（比特）的时候是 1byte（字节），如果一个字节的翻转都无法带来路径变化，此byte极有可能是不会导致crash的数据，所以之后应该用一种思路避开无效byte。
+标记是干什么用的？根据上面的分析，就很好理解了，标记好的数组可以为之后的变异服务，相当于提前“踩雷（踩掉无效byte的雷）”，相当于进行了启发式的判断。无效为0，有效为1。
+达到了怎样的效果？要知道判断的时间开销，对不停循环的fuzzing过程来说是致命的，所以 eff_map 利用在这一次8/8的判断中，通过不大的空间开销，换取了可观的时间开销。(暂时是这样分析的，具体是否真的节约很多，不得而知)
+*/
+
+/*
+  eff_map 这个变量，看代码的话，在变异fuzz_one阶段，这是个贯穿始终的数组，刚开始第一遍看代码其实不是理解的很深刻，现在理解的比较多了，也能理解作者为什么要加这个数组了：
+fuzz_one函数将近两千行，每一个变异阶段都有自己的功能，怎么把上一阶段的信息用于下一阶段，需要一个在函数内通用的局部变量，可以看到fuzz_one一开始的局部变量有很多，有很多类型
+    s32 len, fd, temp_len, i, j;
+  u8  *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
+  u64 havoc_queued,  orig_hit_cnt, new_hit_cnt;
+  u32 splice_cycle = 0, perf_score = 100, orig_perf, prev_cksum, eff_cnt = 1;
+  u8  ret_val = 1, doing_det = 0;
+  u8  a_collect[MAX_AUTO_EXTRA];
+  u32 a_len = 0;
+
+  eff_map的类型是u8（上篇解释过这种看不懂的，可以去types.h里找，这是一个uint8_t = unsigned char 形，8比特（0~255）），并且u8类型只有这一个是map命名形式的，在后面的注释中如果出现Effector map，说的就是这个变量。主要的作用就是标记，在初始化数组的地方有这么一段注释**Initialize effector map for the next step (see comments below). Always flag first and last byte as doing something.**把第一个和最后一个字节单独标记出来用作其他用途，这里其实就说明了，这个map是标记作用，那是标记什么呢，标记
+  当前byte对应的map块是否需要进行阶段变异。如果是0意味着不需要变异，非0（比如1）就需要变异，比如一开始分析的 arithmetic 8/8 阶段就用过这个eff_map，此时已经它在bitflip阶段经过了改变了。
+*/
+
+
+/*
+  type(_p) EFF_APOS(_p){
+    // >> 是位移操作，把参数的二进制形式进行右移，每移动一位就减小2倍，所以这个函数的意思就是：
+    返回传入参数_p除以（2的EFF_MAP_SCALE2次方）。
+    同理另一个方向就是左移，是放大2的幂的倍数。
+    return (_p / 8);
+    // EFF_MAP_SCALE2 在文件config.h中出现，值为3，所以这里就是除以8的意思。
+  }
+  type(_x) EFF_REM(_x){
+    //这里 & 是按位与，所以求的是 _x 与 ((1 << EFF_MAP_SCALE2) - 1)进行按位与，实际上就是跟 7 以二进制形式按位与
+    return (_x & 7)
+  }
+  type(_l) EFF_ALEN(_l){
+    //这里的 !! 是一个两次否，目的是归一化（又是一个骚操作，这个作者写代码真的是净整些这种，主要还是自己菜，菜是原罪）
+    比如 r = !!a，如果a是整数0，则r=0，如果a是整数非0，则r=1。
+    
+    在a不是整数的情况下一般不这么用，但这里都是默认_l为整数的，毕竟字符型转成ascii码那不也是整数吗。
+    return (EFF_APOS(_l) + !!EFF_REM(_l))
+  }
+  type(_p) EFF_SPAN_ALEN(_p, _l){
+      return (EFF_APOS((_p) + (_l) - 1) - EFF_APOS(_p) + 1)
+  }
+*/
+//EFF_APOS - position of a particular file offset in the map. 在map中的特定文件偏移位置。
+//EFF_ALEN - length of a map with a particular number of bytes. 根据特定数量的字节数，计算得到的文件长度。 EFF_SPAN_ALEN - map span for a sequence of bytes. 跳过一块bytes
 #define EFF_APOS(_p)          ((_p) >> EFF_MAP_SCALE2)
 #define EFF_REM(_x)           ((_x) & ((1 << EFF_MAP_SCALE2) - 1))
 #define EFF_ALEN(_l)          (EFF_APOS(_l) + !!EFF_REM(_l))
@@ -5400,8 +5457,8 @@ static u8 fuzz_one(char** argv) {
 
   /* Initialize effector map for the next step (see comments below). Always
      flag first and last byte as doing something. */
-
-  eff_map    = ck_alloc(EFF_ALEN(len));
+  //数组的大小是 EFF_ALEN(len) （EFF_ALEN是一个宏定义的函数），数组元素只有 0/1 两种值,很明显是用来标记
+  eff_map    = ck_alloc(EFF_ALEN(len));   //len来自于队列当前结点queue_cur的成员len，是input length（输入长度），所以这里分配给eff_map的大小是 (文件大小/8) 向下取整，这里的 8 = 2^EFF_MAP_SCALE2。比如文件17bytes，那么这里的EFF_ALEN(_l)就是3。
   eff_map[0] = 1;
 
   if (EFF_APOS(len - 1) != 0) {
@@ -5561,32 +5618,42 @@ skip_bitflip:
    * ARITHMETIC INC/DEC *
    **********************/
   //整数加/减算术运算
-  //加减变异的上限，在config.h中的宏ARITH_MAX定义，默认为35。所以，对目标整数会进行+1, +2, …, +35, -1, -2, …, -35的变异。特别地，由于整数存在大端序和小端序两种表示方式，AFL会贴心地对这两种整数表示方式都进行变异
+  //加减变异的上限，在config.h中的宏ARITH_MAX定义，默认为35，如果需要修改此值，在头文件中修改完之后，要进行编译才会生效。所以，对目标整数会进行+1, +2, …, +35, -1, -2, …, -35的变异。特别地，由于整数存在大端序和小端序两种表示方式，AFL会贴心地对这两种整数表示方式都进行变异
   //此外，AFL还会智能地跳过某些arithmetic变异。第一种情况就是前面提到的effector map：如果一个整数的所有bytes都被判断为“无效”，那么就跳过对整数的变异。第二种情况是之前bitflip已经生成过的变异：如果加/减某个数后，其效果与之前的某种bitflip相同，那么这次变异肯定在上一个阶段已经执行过了，此次便不会再执行
-  
+  //由于整数存在大端序和小端序两种表示，AFL会对这两种表示方式都进行变异。
+  //前面也提到过AFL设计的巧妙之处，AFL尽力不浪费每一个变异，也会尽力让变异不冗余，从而达到快速高效的目标。AFL会跳过某些arithmetic变异：
+    //在 eff_map 数组中对byte进行了 0/1 标记，如果一个整数的所有 bytes 都被判为无效，那么就认为整数无效，跳过此数的变异；
+    //如果加减某数之后效果与之前某bitflip效果相同，认为此次变异在上一阶段已经执行过，此次不再执行；
   /* 8-bit arithmetics. */
   //arith 8/8，每次对8个bit进行加减运算，按照每8个bit的步长从头开始，即对文件的每个byte进行整数加减变异
-  stage_name  = "arith 8/8";
-  stage_short = "arith8";
+  stage_name  = "arith 8/8";    //当前进行的状态，这个在fuzz的时候用来在状态栏展示
+  stage_short = "arith8";       //同上，是简短的状态名
   stage_cur   = 0;
   stage_max   = 2 * len * ARITH_MAX;
+/*ARITH_MAX就是加减变异的最大值限制35，
+  文件大小len bytes，
+  然后进行 +/- 操作乘以2，
+  每个byte要进行的 +/- 操作各35次，
+  所以这个stage_max意思就是将要进行多少次变异，但是之后要是没有进行有效变异就要给减去*/
 
   stage_val_type = STAGE_VAL_LE;
 
-  orig_hit_cnt = new_hit_cnt;
+  orig_hit_cnt = new_hit_cnt;     //暂存用于最后的计算
 
   for (i = 0; i < len; i++) {
 
     u8 orig = out_buf[i];
 
     /* Let's consult the effector map... */
+    //如果当前i byte在eff_map对应位置是0，就跳过此次循环，进入for循环的下一次
+    //并且此byte对应的变异无效，所以要减 2*ARITH_MAX
 
     if (!eff_map[EFF_APOS(i)]) {
       stage_max -= 2 * ARITH_MAX;
       continue;
     }
 
-    stage_cur_byte = i;
+    stage_cur_byte = i;   //当前byte
 
     for (j = 1; j <= ARITH_MAX; j++) {
 
@@ -5594,8 +5661,8 @@ skip_bitflip:
 
       /* Do arithmetic operations only if the result couldn't be a product
          of a bitflip. */
-
-      if (!could_be_bitflip(r)) {
+      //只有当arithmetic变异跟bitflip变异不重合时才会进行
+      if (!could_be_bitflip(r)) {     //判断函数就是对是否重合进行判断的
 
         stage_cur_val = j;
         out_buf[i] = orig + j;
@@ -5603,7 +5670,7 @@ skip_bitflip:
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
         stage_cur++;
 
-      } else stage_max--;
+      } else stage_max--;           //如果没有进行变异，stage_max减一，因为这里属于无效操作
 
       r =  orig ^ (orig - j);
 
@@ -5623,10 +5690,10 @@ skip_bitflip:
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_paths + unique_crashes;              //如果8/8期间有新crash的话会加到这里
 
-  stage_finds[STAGE_ARITH8]  += new_hit_cnt - orig_hit_cnt;
-  stage_cycles[STAGE_ARITH8] += stage_max;
+  stage_finds[STAGE_ARITH8]  += new_hit_cnt - orig_hit_cnt; //这期间增加了的
+  stage_cycles[STAGE_ARITH8] += stage_max;                  //如果之前没有有效变异的话stage_max这里就已经变成0了
 
   /* 16-bit arithmetics, both endians. */
   //每次对16个bit进行加减运算，按照每8个bit的步长从头开始，即对文件的每个word进行整数加减变异
@@ -5819,7 +5886,10 @@ skip_arith:
   /**********************
    * INTERESTING VALUES *
    **********************/
-  //把一些特殊内容替换到原文件中；用于替换的”interesting values”，是AFL预设的一些比较特殊的数,这些数的定义在config.h文件中
+  //把一些特殊内容替换到原文件中；用于替换的”interesting values”，是AFL预设的一些比较特殊的数,这些数的定义在config.h文件中，基本
+  //是些会造成溢出的数值。与前面的思想相同的，本着“避免浪费，减少消耗”的原则，eff_map数组中已经判定无效的就此轮跳过；如果 interesting value 达到
+  //的效果跟 bitflip 或者 arithmetic 效果相同，也被认为是重复消耗，跳过。
+  
   //每次对8个bit进替换，按照每8个bit的步长从头开始，即对文件的每个byte进行替换
   stage_name  = "interest 8/8";
   stage_short = "int8";
@@ -6016,13 +6086,13 @@ skip_interest:
    ********************/
   //进入到这个阶段，就接近deterministic fuzzing的尾声了
   //把自动生成或用户提供的token替换/插入到原文件中。
-  //用户提供的tokens，是在词典文件中设置并通过-x选项指定的，如果没有则跳过相应的子阶段
+  // “用户提供的tokens” 是一开始通过 -x 选项指定的，如果没有则跳过对应的子阶段；“自动检测的tokens” 是第一个阶段 bitflip 生成的。
 
   if (!extras_cnt) goto skip_user_extras;
 
   /* Overwrite with user-supplied extras. */
   //从头开始,将用户提供的tokens依次替换到原文件中,stage_max为extras_cnt * len
-  stage_name  = "user extras (over)";   //从头开始，将用户提供的tokens依次替换到源文件中
+  stage_name  = "user extras (over)";   //从头开始，将用户提供的tokens依次替换到原文件中
   stage_short = "ext_UO";
   stage_cur   = 0;
   stage_max   = extras_cnt * len;
@@ -6080,7 +6150,7 @@ skip_interest:
 
   /* Insertion of user-supplied extras. */
   //从头开始,将用户提供的tokens依次插入到原文件中,stage_max为extras_cnt * len
-  stage_name  = "user extras (insert)";   //从头开始，将用户提供的tokens依次插入到源文件中
+  stage_name  = "user extras (insert)";   //从头开始，将用户提供的tokens依次插入到原文件中
   stage_short = "ext_UI";
   stage_cur   = 0;
   stage_max   = extras_cnt * len;
@@ -6235,7 +6305,7 @@ havoc_stage:
     u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2));
 
     stage_cur_val = use_stacking;
-    //AFL会生成一个随机数（可能是use_stacking)，作为变异组合的数量，并根据这个数量，每次从上面那些方式中随机选取一个（可以参考高中数学的有放回摸球），依次作用到文件上
+    //AFL会生成一个随机数（可能是use_stacking)，作为变异组合的数量，并根据这个数量，每次从上面那些方式中随机选取一个（可以参考高中数学的有放回摸球），依次作用到文件上（能量分配？？？？？）
     for (i = 0; i < use_stacking; i++) {
 
       switch (UR(15 + ((extras_cnt + a_extras_cnt) ? 2 : 0))) {
@@ -6655,7 +6725,10 @@ havoc_stage:
      It takes the current input file, randomly selects another input, and
      splices them together at some offset, then relies on the havoc
      code to mutate that blob. */
-
+  /*
+    AFL会在文件队列中随机选择一个文件与当前文件进行对比，如果差别不大就重新再选；如果差异明显，就随机选取位置两个文件都一切两半。
+    最后将当前文件的头与随机文件的尾拼接起来得到新文件。当然了本着“减少消耗”的原则拼接后的文件应该与上一个文件对比，如果未发生变化应该过滤掉。
+  */
 retry_splicing:
 
   if (use_splicing && splice_cycle++ < SPLICE_CYCLES &&
@@ -7858,7 +7931,7 @@ int main(int argc, char** argv) {
   u32 sync_interval_cnt = 0, seek_to;
   u8  *extras_dir = 0;
   u8  mem_limit_given = 0;  //是否内存限制
-  u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
+  u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");    //设定只跑一次
   char** use_argv;  //用户输入的参数
 
   struct timeval tv;
@@ -7876,6 +7949,7 @@ int main(int argc, char** argv) {
   //上面main中的变量主要是在main内使用，和main外面的关系不大，后面修改的时候上面的变量最好不动
 
   //while循环读取来自命令行的参数输入，判断条件是“命令行”中是否还有输入参数，通过switch-case实现
+  //argc是参数的个数，argv[0]是程序地址，argv[1]是第一个参数，argv[2]是第二个参数。。。以此类推
   while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
 
     switch (opt) {
@@ -7930,13 +8004,13 @@ int main(int argc, char** argv) {
         out_file = optarg;
         break;
 
-      case 'x': /* dictionary */  //设置用户提供的tokens
+      case 'x': /* dictionary */  //设置用户提供的tokens。指定字典，变异阶段会使用
 
         if (extras_dir) FATAL("Multiple -x options not supported");
         extras_dir = optarg;
         break;
 
-      case 't': { /* timeout */ //设置程序运行超时的时间，单位ms
+      case 't': { /* timeout */ //设置程序运行超时的时间，单位ms。因为后面阶段是while循环，这里可以通过设置t来实现定时停止fuzzing
 
           u8 suffix = 0;
 
@@ -8035,7 +8109,7 @@ int main(int argc, char** argv) {
         use_banner = optarg;
         break;
 
-      case 'Q': /* QEMU mode */
+      case 'Q': /* QEMU mode */   //这个模式是用于没有源码的情况下进行fuzz
 
         if (qemu_mode) FATAL("Multiple -Q options not supported");
         qemu_mode = 1;
@@ -8058,7 +8132,7 @@ int main(int argc, char** argv) {
 
   if (sync_id) fix_up_sync();
 
-  if (!strcmp(in_dir, out_dir)) //比较输入输出路径是否一致
+  if (!strcmp(in_dir, out_dir)) //比较输入输出路径（文件夹）是否一致
     FATAL("Input and output directories can't be the same");
 
   if (dumb_mode) {
@@ -8106,21 +8180,21 @@ int main(int argc, char** argv) {
   check_cpu_governor(); //检查CPU管理者
 
   setup_post(); //加载后处理器，如果可用的话
-  setup_shm();  // 设置共享内存块,影响参数g_shm_file_path，g_shm_fd，g_shm_base，trace_bits,trace_bits参数就是在这里设置并初始化置零的。
-  init_count_class16();
+  setup_shm();  // 设置共享内存块&&各种覆盖状态,影响参数g_shm_file_path，g_shm_fd，g_shm_base，trace_bits,trace_bits参数就是在这里设置并初始化置零的。
+  init_count_class16();   //初始化统计计数桶
 
-  setup_dirs_fds(); //设置输出目录和文件描述符,影响sync_id
+  setup_dirs_fds(); //设置输出目录和文件描述符,影响sync_id。主要是和out向关的操作
   read_testcases(); //从输入目录中读取所有测试用例，然后对它们进行排队测试。在启动时被调用
-  load_auto();  //
+  load_auto();  //自动加载字典
 
   pivot_inputs(); //在输出目录中为输入测试用例创建硬链接，选择好名称并相应地旋转。
 
-  if (extras_dir) load_extras(extras_dir);  //从extras目录中读取extras并按大小排序
+  if (extras_dir) load_extras(extras_dir);  //通过用户指定-x指定的字典（extras目录）中读取extras并按大小排序
 
   if (!timeout_given) find_timeout(); //如果有-t的设置了自己的超时，那么会触发这个函数
-
+  //检查是否有@@，通过文件
   detect_file_args(argv + optind + 1);
-
+  //标准输入流
   if (!out_file) setup_stdio_file();  //如果没有使用-f，则为fuzzed data设置输出目录
 
   check_binary(argv[optind]); //搜索路径，找到目标二进制文件，检查文件是否存在，是否为shell脚本，同时检查ELF头以及程序是否被插桩
@@ -8141,12 +8215,14 @@ int main(int argc, char** argv) {
   cull_queue(); 
 
   show_init_stats();  //在处理输入目录的末尾显示快速统计信息，并添加一系列警告。一些校准的东西也在这里结束了，还有一些硬编码的常量。也许最终会清理干净。
-
+  //开始真正的fuzz
   seek_to = find_start_position();  //在恢复时，尝试找到要开始的队列位置。只有在恢复时，以及在可以找到原始fuzzer_stats时，这才有意义。
-
+  //写到out/fuzz_stats
   write_stats_file(0, 0, 0);  //更新一些状态文件
   save_auto();  //自动保存extras，目录/queue/.state/autoextras/auto
 
+  //在main函数中一共只用了两次goto，都是为了结束afl的fuzz过程；
+  //还用到stop_soon变量，这是个标志变量，表示是否按下Ctrl-c，所以ctrl-c是用来停止afl的
   if (stop_soon) goto stop_fuzzing;
 
   /* Woop woop woop */
@@ -8196,7 +8272,7 @@ int main(int argc, char** argv) {
       } else cycles_wo_finds = 0;
 
       prev_queued = queued_paths;
-      
+      //并行fuzz
       if (sync_id && queue_cycle == 1 && getenv("AFL_IMPORT_FIRST"))
         sync_fuzzers(use_argv);
 
@@ -8219,12 +8295,12 @@ int main(int argc, char** argv) {
     }
 
     if (!stop_soon && exit_1) stop_soon = 2;
-
+    //如果按下ctrl-c跳出循环
     if (stop_soon) break;
     //开始测试下一个queue
     queue_cur = queue_cur->next;
     current_entry++;
-  }
+  } //结束while
 
   if (queue_cur) show_stats();
 
@@ -8232,13 +8308,15 @@ int main(int argc, char** argv) {
   write_stats_file(0, 0, 0);
   save_auto();
 
+/*利用goto强制跳到结束，作者用了不少goto跳转，比如在变异阶段的skip_bitflip等，虽然最开始学c的时候，老师也说用goto不好，但是实际情况是用goto真香，在跳转中用的好很好用。*/
 stop_fuzzing:
 
   SAYF(CURSOR_SHOW cLRD "\n\n+++ Testing aborted %s +++\n" cRST,
        stop_soon == 2 ? "programmatically" : "by user");
 
   /* Running for more than 30 minutes but still doing first cycle? */
-
+  /* 运行超过三十分钟，还是第一轮fuzz，就给出提示，说明刚刚的fuzz过程不太行。
+  这时候可以考虑考虑什么情况下会这样，用例数量太多？用例不够精简？程序复杂？程序设置了陷阱让你一直在里面跑来跑去？*/
   if (queue_cycle == 1 && get_cur_time() - start_time > 30 * 60 * 1000) {
 
     SAYF("\n" cYEL "[!] " cRST
@@ -8246,7 +8324,7 @@ stop_fuzzing:
            "    (For info on resuming, see %s/README.)\n", doc_path);
 
   }
-
+  //善后工作
   fclose(plot_file);
   destroy_queue();
   destroy_extras();
