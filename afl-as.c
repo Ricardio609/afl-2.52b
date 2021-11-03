@@ -27,6 +27,7 @@
    note that there is no equivalent for GCC.
 
  */
+//as程序是AFL对clang assembler的包装，主要在链接阶段对目标程序“插桩”，“插桩”的汇编代码在afl-as.h中
 
 #define AFL_MAIN
 

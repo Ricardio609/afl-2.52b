@@ -1324,6 +1324,21 @@ static void update_bitmap_score(struct queue_entry* q) {
 //精简队列
 //在前面讨论的关于case的 top_rated 的计算中，还有一个机制是检查所有的 top_rated[] 条目，然后
 //顺序获取之前没有遇到过的byte的对比分数低的“获胜者”进行标记，标记至少会维持到下一次运行之前。在所有的fuzz步骤中，“favorable”的条目会获得更多的执行时间
+/* 例子
+  tuple t0,t1,t2,t3,t4；seed s0,s1,s2 初始化temp_v=[1,1,1,1,1]
+  s1可覆盖t2,t3 | s2覆盖t0,t1,t4，并且top_rated[0]=s2，top_rated[2]=s1
+  开始后判断temp_v[0]=1，说明t0没有被访问
+  top_rated[0]存在(s2) -> 判断s2可以覆盖的范围 -> trace_mini=[1,1,0,0,1]
+  更新temp_v=[0,0,1,1,0]
+  标记s2为favored
+  继续判断temp_v[1]=0，说明t1此时已经被访问过了，跳过
+  继续判断temp_v[2]=1，说明t2没有被访问
+  top_rated[2]存在(s1) -> 判断s1可以覆盖的范围 -> trace_mini=[0,0,1,1,0]
+  更新temp_v=[0,0,0,0,0]
+  标记s1为favored
+  此时所有tuple都被覆盖，favored为s1,s2
+*/
+
 static void cull_queue(void) {
 
   struct queue_entry* q;
@@ -5226,6 +5241,13 @@ static u8 fuzz_one(char** argv) {
    * SIMPLE BITFLIP (+dictionary construction) *
    *********************************************/
   //按位翻转，1变为0，0变为1
+  /*
+    (_bf) & 7)相当于模8，产生了（0、1、2、3、4、5、6、7）
+    128是二进制的10000000.
+    等式的右边相当于将128右移动0-7个单位产生了二进制从（10000000 - 1）
+    (_bf) >> 3相当于_bf/8
+    //对于FLIP_BIT(_ar, _b)来说，_bf最大为(len << 3)>>3还是len
+  */
 #define FLIP_BIT(_ar, _b) do { \
     u8* _arf = (u8*)(_ar); \
     u32 _bf = (_b); \
@@ -5245,15 +5267,16 @@ static u8 fuzz_one(char** argv) {
 
   prev_cksum = queue_cur->exec_cksum;
   //所以在从0-len*8的遍历过程中会通过异或运算，依次将每个位翻转，然后执行一次common_fuzz_stuff，然后再翻转回来
+  //对于这个for循环来说，每运行8次循环_arf[i]（大小为一个字节）的下标i就会加一，i最大为len
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
-
+    //在每8次为一组的循环中，128分别右移0、1、2、3、4、5、6、7位，将右移后产生的数字与_arf[i]进行异或翻转，而_arf[i]大小为一个字节，等价于对这个字节的每一位都做一次翻转异或
     stage_cur_byte = stage_cur >> 3;
 
     FLIP_BIT(out_buf, stage_cur);
     //common_fuzz_stuff执行变异后的结果，然后还原
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
-    FLIP_BIT(out_buf, stage_cur);
+    FLIP_BIT(out_buf, stage_cur);   
     
     //在进行为翻转的时候，程序会随时注意翻转之后的变化。比如说，对于一段 xxxxxxxxIHDRxxxxxxxx 的
     //文件字符串，当改变 IHDR 任意一个都会导致奇怪的变化，这个时候，程序就会认为 IHDR 是一个可以让fuzzer很激动的“神仙值”--token

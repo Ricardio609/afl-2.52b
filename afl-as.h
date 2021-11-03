@@ -126,7 +126,7 @@ static const u8* trampoline_fmt_32 =
   "\n"
   "/* --- END --- */\n"
   "\n";
-
+//在插桩过程中保护原有现场
 static const u8* trampoline_fmt_64 =
 
   "\n"
@@ -134,16 +134,16 @@ static const u8* trampoline_fmt_64 =
   "\n"
   ".align 4\n"
   "\n"
-  "leaq -(128+24)(%%rsp), %%rsp\n"
-  "movq %%rdx,  0(%%rsp)\n"           //保存rdx、rcx、rax寄存器
+  "leaq -(128+24)(%%rsp), %%rsp\n"    //将栈顶抬高128+24个字节
+  "movq %%rdx,  0(%%rsp)\n"           //保存在_afl_maybe_loop中会被覆盖的rdx、rcx、rax寄存器压栈
   "movq %%rcx,  8(%%rsp)\n"           //只有在mov rcx, xxx这里不同，其xxx的取值就是随机数R(MAP_SIZE),以此来标识与区分每个分支点，然后传入__afl_maybe_log作为第二个参数调用这个函数
   "movq %%rax, 16(%%rsp)\n"     
-  "movq $0x%08x, %%rcx\n"             //64位下使用的寄存器是rcx；将rcx的值设置为fprintf()函数要打印的变量内容
+  "movq $0x%08x, %%rcx\n"             //64位下使用的寄存器是rcx；代码块编号当作参数放入rcx；将rcx的值设置为fprintf()函数要打印的变量内容
   "call __afl_maybe_log\n"            //调用__afl_maybe_log函数
   "movq 16(%%rsp), %%rax\n"           //恢复寄存器
   "movq  8(%%rsp), %%rcx\n"
   "movq  0(%%rsp), %%rdx\n"
-  "leaq (128+24)(%%rsp), %%rsp\n"
+  "leaq (128+24)(%%rsp), %%rsp\n"     //恢复栈顶位置
   "\n"
   "/* --- END --- */\n"
   "\n";
@@ -394,9 +394,11 @@ static const u8* main_payload_64 =
 #if defined(__OpenBSD__)  || (defined(__FreeBSD__) && (__FreeBSD__ < 9))
   "  .byte 0x9f /* lahf */\n"
 #else
+  //对于FLAGS寄存器，在高8位中只有OF（溢出）标志位会受影响，对flags寄存器的保存恢复：
+  //lahf用于将标志寄存器的低八位送入AH，即将标志寄存器FLAGS中的SF、ZF、AF、PF、CF五个标志位分别传送到累加器AH的对应位（八位中有三位是无效的）
   "  lahf\n"   //使用 lahf 指令（加载状态标志位到AH）将EFLAGS寄存器的低八位复制到 AH，被复制的标志位包括：符号标志位（SF）、零标志位（ZF）、辅助进位标志位（AF）、奇偶标志位（PF）和进位标志位（CF），使用该指令可以方便地将标志位副本保存在变量中
 #endif /* ^__OpenBSD__, etc */
-  "  seto  %al\n"   //使用 seto 指令溢出置位
+  "  seto  %al\n"   //使用 seto 指令溢出置位.保存OF标志位至al,如OF=1, al=11111111=127
   "\n"
   "  /* Check if SHM region is already mapped. */\n"
   "\n"
@@ -422,11 +424,11 @@ static const u8* main_payload_64 =
   "\n"
   "__afl_return:\n"
   "\n"
-  "  addb $127, %al\n"
+  "  addb $127, %al\n"      //恢复OF中标志位
 #if defined(__OpenBSD__)  || (defined(__FreeBSD__) && (__FreeBSD__ < 9))
   "  .byte 0x9e /* sahf */\n"
 #else
-  "  sahf\n"
+  "  sahf\n"            //将AH中的值恢复至flags低8位
 #endif /* ^__OpenBSD__, etc */
   "  ret\n"
   "\n"
