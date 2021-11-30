@@ -35,6 +35,11 @@
 # This script must use bash because other shells may have hardcoded limits on
 # array sizes.
 #
+/*
+    afl-cmin是为了删减，把多个用例组成的集合，删减成具有同等效果的子集
+
+    最后筛选结果是只有一个文件，最后一个文件，推测是每次用一个文件跟之前的比较，如果能达到上一个的效果，就替换掉上一个文件
+*/
 
 echo "corpus minimization tool for afl-fuzz by <lcamtuf@google.com>"
 echo

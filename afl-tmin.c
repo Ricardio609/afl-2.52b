@@ -19,6 +19,13 @@
 
  */
 
+/*
+ *      创造一个更小的文件，同时又能达到同样的效果.对单个文件处理
+ *      tmin就是把我们提供的文件放到afl编译出来的程序里跑，然后再按一定方式进行精简
+ *      tmin的 -i 文件不是一定要binary文件；testcase太垃圾是会被tmin全部干掉的；testcase可以是乱文件，不一定跟crash有关系
+ *
+ */
+
 #define AFL_MAIN
 
 #include "config.h"
@@ -50,7 +57,7 @@ static u8 *trace_bits,                /* SHM with instrumentation bitmap   */
           *mask_bitmap;               /* Mask for trace bits (-B)          */
 
 static u8 *in_file,                   /* Minimizer input test case         */
-          *out_file,                  /* Minimizer output file             */
+          *out_file,                  /* Minimizer output file           in_file 和 out_file 分别是 -i 和 -o 之后的参数存放的自变量。in_file 就相当于字符串，如果输出，可以直接用来输出文件名  */
           *prog_in,                   /* Targeted program input file       */
           *target_path,               /* Path to target binary             */
           *doc_path;                  /* Path to docs                      */
@@ -190,7 +197,7 @@ static void setup_shm(void) {
 
 
 /* Read initial file. */
-
+//用 in_file 作为路径，除了读取文件，还会在读取文件之前进行分析路径是否合适等等
 static void read_initial_file(void) {
 
   struct stat st;
@@ -217,7 +224,7 @@ static void read_initial_file(void) {
 
 
 /* Write output file. */
-
+//用 path 作为路径，将处理好的数据，写到文件中
 static s32 write_to_file(u8* path, u8* mem, u32 len) {
 
   s32 ret;
@@ -411,7 +418,7 @@ static u32 next_p2(u32 val) {
 
 
 /* Actually minimize! */
-
+//tmin最核心的部分，用来处理读取到的数据
 static void minimize(char** argv) {
 
   static u32 alpha_map[256];
@@ -803,13 +810,13 @@ static void detect_file_args(char** argv) {
 
 
 /* Display usage hints. */
-
+//用来显示提示部分，添加新参数之后，在此修改提示
 static void usage(u8* argv0) {
 
   SAYF("\n%s [ options ] -- /path/to/target_app [ ... ]\n\n"
 
        "Required parameters:\n\n"
-
+        
        "  -i file       - input test case to be shrunk by the tool\n"
        "  -o file       - final output location for the minimized data\n\n"
 
@@ -977,9 +984,10 @@ int main(int argc, char** argv) {
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
   SAYF(cCYA "afl-tmin " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
-
-  while ((opt = getopt(argc,argv,"+i:o:f:m:t:B:xeQ")) > 0)
-
+  //while实现对命令行所有参数都能读取，并通过一个switch实现对读取到的命令行参数进行判断
+  //一直到 close(write_to_file(out_file, in_data, in_len)); 之前，都是对文件的操作部分，这一部分可以当作一个代码块（或者是没有抽象出来的函数）对待，利用读文件函数，最小化函数，输出到文件函数，实现 tmin 核心操作
+  while ((opt = getopt(argc,argv,"+i:o:f:m:t:B:xeQ")) > 0)    
+    //在开始对文件进行处理之前，要对while过程读取到的一些参数进行初步检查，保证之后不能报错
     switch (opt) {
 
       case 'i':
@@ -1095,7 +1103,7 @@ int main(int argc, char** argv) {
         usage(argv[0]);
 
     }
-
+   /* 初步检查参数合法性 */
   if (optind == argc || !in_file || !out_file) usage(argv[0]);
 
   setup_shm();
