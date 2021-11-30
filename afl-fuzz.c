@@ -114,7 +114,9 @@ EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *in_bitmap,                 /* Input bitmap                     */
           *doc_path,                  /* Path to documentation dir        */
           *target_path,               /* Path to target binary            */
-          *orig_cmdline;              /* Original command line            */
+          *orig_cmdline,              /* Original command line            */
+          *old_out_dir;               /* 新添加的字段，用于保存fuzz停止时out文件夹利里有价值的种子, 当出现 out 文件夹比较有用时旧的文件保存  */
+
 
 EXP_ST u32 exec_tmout = EXEC_TIMEOUT; /* Configurable exec timeout (ms)   */
 static u32 hang_tmout = EXEC_TIMEOUT; /* Timeout used for hang det (ms)   */
@@ -250,12 +252,12 @@ static FILE* plot_file;               /* Gnuplot output file              */
 
 struct queue_entry {
 
-  u8* fname;                          /* File name for the test case      */
+  u8* fname;                          /* File name for the test case    测试用例的文件名  */
   u32 len;                            /* Input length   testcase大小                  */
 
   u8  cal_failed,                     /* Calibration failed?    标准失败          */
       trim_done,                      /* Trimmed?   该testcase是否被修建                      */
-      was_fuzzed,                     /* Had any fuzzing done yet?        */
+      was_fuzzed,                     /* Had any fuzzing done yet?        是否已经经过fuzzing  */
       passed_det,                     /* Deterministic stages passed?     */
       has_new_cov,                    /* Triggers new coverage?           */
       var_behavior,                   /* Variable behavior?               */
@@ -272,7 +274,7 @@ struct queue_entry {
   u8* trace_mini;                     /* Trace bytes, if kept       1个bit存一个byte的trace_mini      */
   u32 tc_ref;                         /* Trace bytes ref count      top_rate[]中该testcase入选的次数      */
 
-  struct queue_entry *next,           /* Next element, if any             */
+  struct queue_entry *next,           /* Next element, if any      队列下一结点       */
                      *next_100;       /* 100 elements ahead               */
 
 };
@@ -420,6 +422,7 @@ static void shuffle_ptrs(void** ptrs, u32 cnt) {
 
 /* Build a list of processes bound to specific cores. Returns -1 if nothing
    can be found. Assumes an upper bound of 4k CPUs. */
+//尝试绑定空闲的cpu
 
 static void bind_to_free_cpu(void) {
 
@@ -517,7 +520,7 @@ static void bind_to_free_cpu(void) {
     FATAL("No more free CPU cores");
 
   }
-
+//获取空闲的cpu，尝试绑定
   OKF("Found a free CPU core, binding to #%u.", i);
 
   cpu_aff = i;
@@ -1164,7 +1167,7 @@ static u16 count_class_lookup16[65536];
   例如：A->B->C->D->A-B， 可以用[A,B] [B,C] [C,D] [D,A]四个二元组表示，只需要记录跳转的源地址和目标地址。并且[A,B]执行了两次，其余执行了一次，这里用hash映射在一张map中。
   而基于这种二元组的表示的效率考虑，又使用了u16 count_class_lookup16[65536] 这个数组，并在此初始化。
 */
-
+//对应每一条边的执行次数
 EXP_ST void init_count_class16(void) {
 
   u32 b1, b2;
@@ -1414,10 +1417,10 @@ EXP_ST void setup_shm(void) {
 
   u8* shm_str;
   //如果 in_bitmap 为空，调用 memset将virgin_bits[MAP_SIZE]数组的每个元素置为255（0xff）
-  if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);
+  if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);   //所有的覆盖状态
 
-  memset(virgin_tmout, 255, MAP_SIZE);      //调用 memset 初始化数组 virgin_tmout[MAP_SIZE] 的每个元素的值为 ‘255’
-  memset(virgin_crash, 255, MAP_SIZE);      // 调用 memset 初始化数组 virgin_crash[MAP_SIZE] 的每个元素的值为 ‘255’
+  memset(virgin_tmout, 255, MAP_SIZE);      //调用 memset 初始化数组 virgin_tmout[MAP_SIZE] 的每个元素的值为 ‘255’ time out的覆盖状态
+  memset(virgin_crash, 255, MAP_SIZE);      // 调用 memset 初始化数组 virgin_crash[MAP_SIZE] 的每个元素的值为 ‘255’ crash的覆盖状态
   //调用shmget函数分配一块共享内存，将返回的共享内存标识符存到shm_id
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
   /*
@@ -1483,7 +1486,7 @@ static void setup_post(void) {
   if (!post_handler) FATAL("Symbol 'afl_postprocess' not found.");
 
   /* Do a quick test. It's better to segfault now than later =) */
-
+  //测试
   post_handler("hello", &tlen);
 
   OKF("Postprocessor installed successfully.");
@@ -1558,7 +1561,7 @@ static void read_testcases(void) {
       continue;
 
     }
-
+    //种子不要大于 1M
     if (st.st_size > MAX_FILE) 
       FATAL("Test case '%s' is too big (%s, limit is %s)", fn,
             DMS(st.st_size), DMS(MAX_FILE));
@@ -1570,7 +1573,7 @@ static void read_testcases(void) {
 
     if (!access(dfn, F_OK)) passed_det = 1;
     ck_free(dfn);
-    //调用函数 add_to_queue() 将测试用例排成queue队列。该函数会在启动时进行调用
+    //调用函数 add_to_queue() 将测试用例排成queue队列。该函数会在启动时进行调用     对种子信息初始化，加入队列
     add_to_queue(fn, st.st_size, passed_det);     //在read_testcases的时候会调用add_to_queue，此时所有的input case的queue depth都会被设置为1。
 
   }
@@ -1997,7 +2000,7 @@ static void save_auto(void) {
 
 
 /* Load automatically generated extras. */
-//load自动生成的提取出来的词典token
+//load自动生成的提取出来的词典token         加载自动生成的字典，token使用次数越多，排名越前
 static void load_auto(void) {
 
   u32 i;
@@ -2024,7 +2027,7 @@ static void load_auto(void) {
     len = read(fd, tmp, MAX_AUTO_EXTRA + 1);
 
     if (len < 0) PFATAL("Unable to read from '%s'", fn);
-
+    //token越短，排名越前
     if (len >= MIN_AUTO_EXTRA && len <= MAX_AUTO_EXTRA)
       maybe_add_auto(tmp, len);
 
@@ -2672,7 +2675,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
   stage_name = "calibration";   //阶段名称
   //根据是否fast_cal为1，来设置stage_max的值为3还是CAL_CYCLES(默认为8)，含义是每个新测试用例（以及显示出可变行为的测试用例）的校准
-  //周期数，也就是说这个stage要执行几次的意思
+  //设置校验次数；默认是8，可以设置成3   周期数，也就是说这个stage要执行几次的意思
   stage_max  = fast_cal ? 3 : CAL_CYCLES;        // 设置 stage_max，新测试用例的校准周期数
 
   /* Make sure the forkserver is up before we do anything, and let's not
@@ -2705,7 +2708,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
     /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
        we want to bail out quickly. */
-
+    //如果执行失败，种子校准置空
     if (stop_soon || fault != crash_mode) goto abort_calibration;
     //如果这是calibration stage第一次运行，且不在dumb_mode，且共享内存里没有
     //任何路径（即没有任何byte被置位），设置fault为FAULT_NOINST,然后goto abort_calibration
@@ -2717,7 +2720,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);   //校验此次运行的trace_bits，检查是否出现新的情况
     //先用cksum也就是本次运行的出现trace_bits哈希和本次testcase q->exec_cksum对比
     //如果发现不同，则调用has_new_bits函数和我们的总表virgin_bits对比
-    if (q->exec_cksum != cksum) {  
+    if (q->exec_cksum != cksum) {       //检查是否有新的覆盖状态 
       //如果q->exec_cksum不等于cksum，即代表这是第一次运行，或者在相同的参数下，每次执行，cksum却不同，是一个路径可变的queue
       u8 hnb = has_new_bits(virgin_bits);
       if (hnb > new_bits) new_bits = hnb;
@@ -2753,7 +2756,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     }
 
   }
-
+  //检查是否有新的覆盖状态
   stop_us = get_cur_time_us();
   
   total_cal_us     += stop_us - start_us;     //保存所有轮次总的执行时间，加到total_cal_us里，总的执行轮次，加到total_cal_cycles里
@@ -2763,13 +2766,14 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
      This is used for fuzzing air time calculations in calculate_score(). */
 
   q->exec_us     = (stop_us - start_us) / stage_max;  //执行时间延迟，计算出单次执行时间的平均值保存到q->exec_us里
-  q->bitmap_size = count_bytes(trace_bits);   //bitmap大小，将最后一次执行所覆盖到的路径数保存到q->bitmap_size里
-  q->handicap    = handicap;
-  q->cal_failed  = 0;   //校准错误
+  q->bitmap_size = count_bytes(trace_bits);   //bitmap大小，将最后一次执行所覆盖到的路径数保存到q->bitmap_size里    命中的边的次数
+  q->handicap    = handicap;                  //种子执行了几轮
+  q->cal_failed  = 0;   //校准错误,总校验数
 
   total_bitmap_size += q->bitmap_size;  //total_bitmap_size里加上这个queue所覆盖到的路径数
   total_bitmap_entries++;
   // 对这个测试用例的每一个byte进行排序，用一个top_rate[]来维护它的最佳入口
+  // 更新q的分数（更新优先选择队列）
   update_bitmap_score(q);
 
   /* If this case didn't result in new output from the instrumentation, tell
@@ -2781,7 +2785,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   if (!dumb_mode && first_run && !fault && !new_bits) fault = FAULT_NOBITS;
 //中断校准
 abort_calibration:
-
+  //是否产生新的路径
   if (new_bits == 2 && !q->has_new_cov) {
     q->has_new_cov = 1;
     queued_with_cov++;  //代表有一个queue发现了新路径
@@ -2867,7 +2871,7 @@ static void perform_dry_run(char** argv) {
            q->len, q->bitmap_size, q->exec_us); //打印
     //根据返回值res，查看哪种错误并进行判断。错误类型在本文件开头定义
     switch (res) {
-
+      //什么都没有的情况
       case FAULT_NONE:
         //如果q是头结点，即第一个测试用例，则check_map_coverage，用以评估map coverage
         if (q == queue) check_map_coverage();    // 如果为头结点，调用check_map_coverage评估覆盖率
@@ -2875,7 +2879,7 @@ static void perform_dry_run(char** argv) {
         if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);    // 抛出异常
 
         break;
-
+      //超时的情况
       case FAULT_TMOUT:
 
         if (timeout_given) {
@@ -2914,7 +2918,7 @@ static void perform_dry_run(char** argv) {
           FATAL("Test case '%s' results in a timeout", fn);
 
         }
-
+      //产生crash
       case FAULT_CRASH:  
 
         if (crash_mode) break;
@@ -3253,6 +3257,8 @@ static void write_crash_readme(void) {
    save or queue the input test case for further analysis if so. Returns 1 if
    entry is saved, 0 otherwise. */
 //判断是否保存这个测试用例;检查这个case的执行结果是否是interesting的，决定是否保存或跳过。如果保存了这个case，则返回1，否则返回0
+//是否新路径 && 是否新类型（之前的分类）
+//评分：更快的时间、更小的存储大小
 static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
@@ -3812,9 +3818,19 @@ static void maybe_delete_out_dir(void) {
            "    session, put '-' as the input directory in the command line ('-i -') and\n"
            "    try again.\n", OUTPUT_GRACE);
 
-       FATAL("At-risk data found in '%s'", out_dir);
-
+       /*  当发现 valuable out info 的时候，对文件夹进行暂存操作，让程序继续进行  (发现文件夹有价值，又不舍得删，就备份一下，跟cmin思路相同)*/
+       if ((old_out_dir = alloc_printf("%s_old", out_dir))) {            //如果输入路径合适，新的备份路径合适，重命名，并新建空文件夹
+           rename(out_dir, old_out_dir);                               //rename操作，重命名文件夹
+           mkdir(out_dir, 0700);                                       //mkdir新建文件夹，用的是旧的名字
+           OKF("Success to create old_file_dir and move valuable files in it.");
+       } else {                                                       //如果不合适，继续之前的FATAL操作，停止程序   (如果最开始的拼接失败，可能是out_dir本身就有问题，停止程序)
+           OKF("Fail to move file!!!");
+           FATAL("At-risk data found in '%s'", out_dir);
+      }
     }
+     // FATAL("At-risk data found in '%s'", out_dir);
+
+    
 
   }
 
@@ -4829,12 +4845,12 @@ static u32 calculate_score(struct queue_entry* q) {
 
   u32 avg_exec_us = total_cal_us / total_cal_cycles;
   u32 avg_bitmap_size = total_bitmap_size / total_bitmap_entries;
-  u32 perf_score = 100;
+  u32 perf_score = 100;     //满分
 
   /* Adjust score based on execution speed of this path, compared to the
      global average. Multiplier ranges from 0.1x to 3x. Fast inputs are
      less expensive to fuzz, so we're giving them more air time. */
-
+  //执行时间
   if (q->exec_us * 0.1 > avg_exec_us) perf_score = 10;
   else if (q->exec_us * 0.25 > avg_exec_us) perf_score = 25;
   else if (q->exec_us * 0.5 > avg_exec_us) perf_score = 50;
@@ -4845,7 +4861,7 @@ static u32 calculate_score(struct queue_entry* q) {
 
   /* Adjust score based on bitmap size. The working theory is that better
      coverage translates to better targets. Multiplier from 0.25x to 3x. */
-
+  //命中的分支数
   if (q->bitmap_size * 0.3 > avg_bitmap_size) perf_score *= 3;
   else if (q->bitmap_size * 0.5 > avg_bitmap_size) perf_score *= 2;
   else if (q->bitmap_size * 0.75 > avg_bitmap_size) perf_score *= 1.5;
@@ -4856,7 +4872,7 @@ static u32 calculate_score(struct queue_entry* q) {
   /* Adjust score based on handicap. Handicap is proportional to how late
      in the game we learned about this path. Latecomers are allowed to run
      for a bit longer until they catch up with the rest. */
-
+  //经过fuzz的论数，轮数越多，排名越高
   if (q->handicap >= 4) {
 
     perf_score *= 4;
@@ -4875,7 +4891,7 @@ static u32 calculate_score(struct queue_entry* q) {
   //q->depth,它在每次add_to_queue的时候，会设置为cur_depth+1，而cur_depth是一个全局变量，一开始的初始值为0
   //处理输入时:在read_testcases的时候会调用add_to_queue，此时所有的input case的queue depth都会被设置为1
   //然后在后面fuzz_one的时候，会先设置cur_depth为当前queue的depth，然后这个queue经过mutate之后调用save_if_interesting,如果是interesting case，就会被add_to_queue，此时就建立起了queue之间的关联关系，所以由当前queue变异加入的新queue，深度都在当前queue的基础上再增加
-  switch (q->depth) {
+  switch (q->depth) {       //队列的深度
 
     case 0 ... 3:   break;
     case 4 ... 7:   perf_score *= 2; break;
@@ -5128,6 +5144,7 @@ static u8 fuzz_one(char** argv) {
     /* Otherwise, still possibly skip non-favored cases, albeit less often.
        The odds of skipping stuff are higher for already-fuzzed inputs and
        lower for never-fuzzed entries. */
+     //计算概率，种子会不会被跳过
     //如果queue_cycle大于1且queue_cur没有被fuzz过，则有75%的概率直接返回1
     if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
 
@@ -5200,7 +5217,7 @@ static u8 fuzz_one(char** argv) {
   /************
    * TRIMMING *
    ************/
-  //如果测试用例没有修剪过，那么调用函数trim_case对测试用例进行修剪
+  //如果测试用例没有修剪过，那么调用函数trim_case对测试用例进行修剪  对种子大小进行修剪
   if (!dumb_mode && !queue_cur->trim_done) {
 
     u8 res = trim_case(argv, queue_cur, in_buf);
@@ -5227,12 +5244,14 @@ static u8 fuzz_one(char** argv) {
    * PERFORMANCE SCORE *
    *********************/
   //修剪完毕之后，使用calculate_score对每个测试用例进行打分
+  //分数 计算；对分数的计算（比如上下文敏感的情况，可以在里面调整分数的计算机制）
+  //“分数计算”的函数论文中用到比较多
   orig_perf = perf_score = calculate_score(queue_cur);
 
   /* Skip right away if -d is given, if we have done deterministic fuzzing on
      this entry ourselves (was_fuzzed), or if it has gone through deterministic
      testing in earlier, resumed runs (passed_det). */
-  //如果该queue已经完成deterministic阶段，则直接跳到havoc阶段
+  //如果该queue已经完成deterministic阶段（也就是bit、ari、int、dic的确定性变异），则直接跳到havoc阶段
   if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
     goto havoc_stage;
 
@@ -5248,7 +5267,7 @@ static u8 fuzz_one(char** argv) {
   /*********************************************
    * SIMPLE BITFLIP (+dictionary construction) *
    *********************************************/
-  //按位翻转，1变为0，0变为1
+  //按位翻转，1变为0，0变为1        位翻转（同时会有自动的字典生成【tokens】）
   /*
     (_bf) & 7)相当于模8，产生了（0、1、2、3、4、5、6、7）
     128是二进制的10000000.
@@ -5315,7 +5334,7 @@ static u8 fuzz_one(char** argv) {
        behavior, but fails gracefully, so we'll carry out the checks anyway.
 
       */
-
+    //怎么选择token，加到自动的字典里
     if (!dumb_mode && (stage_cur & 7) == 7) {
 
       u32 cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
@@ -6122,6 +6141,7 @@ skip_interest:
   if (!extras_cnt) goto skip_user_extras;
 
   /* Overwrite with user-supplied extras. */
+  //-x的时候，用户提供的，直接覆盖
   //从头开始,将用户提供的tokens依次替换到原文件中,stage_max为extras_cnt * len
   stage_name  = "user extras (over)";   //从头开始，将用户提供的tokens依次替换到原文件中
   stage_short = "ext_UO";
@@ -6180,7 +6200,7 @@ skip_interest:
   stage_cycles[STAGE_EXTRAS_UO] += stage_max;
 
   /* Insertion of user-supplied extras. */
-  //从头开始,将用户提供的tokens依次插入到原文件中,stage_max为extras_cnt * len
+  //从头开始,将-x用户提供的tokens依次插入到原文件(种子)中,stage_max为extras_cnt * len
   stage_name  = "user extras (insert)";   //从头开始，将用户提供的tokens依次插入到原文件中
   stage_short = "ext_UI";
   stage_cur   = 0;
@@ -6229,7 +6249,7 @@ skip_interest:
   stage_cycles[STAGE_EXTRAS_UI] += stage_max;
 
 skip_user_extras:
-
+  //用自动生成的字典，只提供overwrite的形式
   if (!a_extras_cnt) goto skip_extras;
   
   //从头开始,将自动检测的tokens依次替换到原文件中,stage_max为MIN(a_extras_cnt, USE_AUTO_EXTRAS) * len
@@ -6293,6 +6313,7 @@ skip_extras:
    ****************/
   //havoc，顾名思义，是充满了各种随机生成的变异，是对原文件的“大破坏”。具体来说，havoc包含了对原文件的多轮变异，每一轮都是将多种方式组合（stacked）而成
   //对于非dumb mode的主fuzzer来说，完成了上述deterministic fuzzing后，便进入了充满随机性的这一阶段；对于dumb mode或者从fuzzer来说，则是直接从这一阶段开始
+  /* 随即处理阶段，因为前面的阶段耗时长，所以，从第二轮开始，就直接跳到此处进行变异  */
 havoc_stage:
 
   stage_cur_byte = -1;
@@ -6840,7 +6861,7 @@ retry_splicing:
   }
 
 #endif /* !IGNORE_FINDS */
-
+//什么都没发现
   ret_val = 0;
 
 abandon_entry:
@@ -6870,6 +6891,7 @@ abandon_entry:
 
 
 /* Grab interesting test cases from other fuzzers. */
+//并行fuzz
 //读取其他sync文件夹下的queue文件，然后保存到自己的queue里
 //这个函数就是先读取有哪些fuzzer文件夹，然后读取其他fuzzer文件夹下的queue文件夹里的case，并依次执行，如果发现了新path，就保存到自己的queue文件夹里，而且将最后一个sync的case id写入到.synced/其他fuzzer文件夹名文件里，以避免重复运行
 static void sync_fuzzers(char** argv) {
@@ -7336,7 +7358,7 @@ EXP_ST void setup_dirs_fds(void) {
   s32 fd;
 
   ACTF("Setting up output directories...");
-   /* 如果sync_id，且创建sync_dir文件夹并设置权限为0700，如果报错单errno不是 EEXIST ，抛出异常 */
+   /* 并行情况的处理:如果sync_id，且创建sync_dir文件夹并设置权限为0700，如果报错单errno不是 EEXIST ，抛出异常 */
   if (sync_id && mkdir(sync_dir, 0700) && errno != EEXIST)
       PFATAL("Unable to create '%s'", sync_dir);
   
@@ -7363,7 +7385,7 @@ EXP_ST void setup_dirs_fds(void) {
   }
 
   /* Queue directory for any starting & discovered paths. */
-
+  //队列目录
   tmp = alloc_printf("%s/queue", out_dir);      
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);     // 创建 out_dir/queue 文件夹，权限为0700
   ck_free(tmp);
@@ -7401,7 +7423,7 @@ EXP_ST void setup_dirs_fds(void) {
   ck_free(tmp);
 
   /* Sync directory for keeping track of cooperating fuzzers. */
-
+  //同步文件夹，多线程跑的时候，用于keeping track
   if (sync_id) {
 
     tmp = alloc_printf("%s/.synced/", out_dir);
@@ -7535,7 +7557,7 @@ static void check_crash_handling(void) {
 
 
 /* Check CPU governor. */
-
+//主要是cpu调度算法
 static void check_cpu_governor(void) {
 
   FILE* f;
@@ -7591,7 +7613,7 @@ static void check_cpu_governor(void) {
 
 
 /* Count the number of logical CPU cores. */
-
+// 逻辑核的数量；不是有多少cpu内核
 static void get_core_count(void) {
 
   u32 cur_runnable = 0;
@@ -7956,7 +7978,7 @@ static void save_cmdline(u32 argc, char** argv) {
 /* Main entry point */
 
 int main(int argc, char** argv) {
-
+  //局部变量
   s32 opt;
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0, seek_to;
@@ -8238,7 +8260,7 @@ int main(int argc, char** argv) {
   else
     use_argv = argv + optind;
   
-  //主循环前的准备工作
+  //主循环前的准备工作,校验初始种子，对种子进行处理
   perform_dry_run(use_argv);  //afl关键函数,执行 input 文件夹下的预先准备的所有测试用例，生成初始化的 queue 和 bitmap，只对初始输入执行一次
 
   //精简队列。对初始队列进行筛选（更新favored entry）。遍历top_rated[]中的queue，然后提取出发现新edge的entry，并标记为favored，
@@ -8268,13 +8290,13 @@ int main(int argc, char** argv) {
   while (1) {
 
     u8 skipped_fuzz;
-
+    //更新队列
     cull_queue(); // 对queue进行筛选;精简队列
     //如果queue_cur为空，代表所有queue都被执行完一轮
     if (!queue_cur) {   //判断queue_cur队列是否为空，如果是，则表示已经完成对队列的遍历（所有queue都被执行完一轮），初始化相关参数，重新开始遍历队列
 
-      queue_cycle++;            //计数器，代表所有queue被完整执行了多少轮
-      current_entry     = 0;    //设置current_entry为0，和queue_cur为queue首元素，开始新一轮fuzz
+      queue_cycle++;            //计数器，代表所有queue被完整执行了多少轮,现在在进行第几轮的循环
+      current_entry     = 0;    //设置current_entry为0，和queue_cur为queue首元素，开始新一轮fuzz. 现在fuzz的是第几个值
       cur_skipped_paths = 0;
       queue_cur         = queue;    //准备开始新的一轮
 
@@ -8295,7 +8317,7 @@ int main(int argc, char** argv) {
       /* If we had a full queue cycle with no new finds, try
          recombination strategies next. */
       //如果一整个队列循环都没新发现，尝试重组策略
-      //如果在一轮执行之后的queue里的case数，和执行之前一样，代表在完整的一轮执行里都没有发现任何一个新的case
+      //如果在一轮执行之后的queue里的case数，和执行之前一样，代表在完整的一轮执行里都没有发现任何一个新的case   队列没有更新的话，没有产生interesting的种子
       if (queued_paths == prev_queued) {
 
         if (use_splicing) cycles_wo_finds++; else use_splicing = 1;   //use_splicing=1代表我们接下来要通过splice重组queue里的case
