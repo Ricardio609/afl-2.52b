@@ -1307,7 +1307,7 @@ static void minimize_bits(u8 *dst, u8 *src)
 //以上过程的第一步是为bitmap中的每个字节维护一个 top_rated[] 的列表，这里会计算究竟哪些位置是更“合适”的，该函数主要实现该过程
 static void update_bitmap_score(struct queue_entry *q)
 {
-    //首先计算出这个case的fav_factor，计算方法是q->exec_us * q->len即执行时间和样例大小的乘积，以这两个指标来衡量权重
+    //首先计算出这个case的fav_factor，计算方法是q->exec_us * q->len即执行时间和样例大小的乘积，以这两个指标来衡量权重,越小越优
     u32 i;
     u64 fav_factor = q->exec_us * q->len;
 
@@ -1315,11 +1315,11 @@ static void update_bitmap_score(struct queue_entry *q)
        and how it compares to us. */
 
     for (i = 0; i < MAP_SIZE; i++)
-        //遍历trace_bits数组，如果该字节的值不为0，则代表这是已经被覆盖到的path
+        //遍历trace_bits数组，如果该字节的值不为0，则代表这是已经被覆盖到的path(tuple?)
         if (trace_bits[i])
         {
             //然后检查对应于这个path的top_rated是否存在
-            if (top_rated[i])
+            if (top_rated[i]) // top_rated[]保存各tuple相应的最优测试用例
             {
 
                 /* Faster-executing or smaller test cases are favored. */
@@ -1346,7 +1346,7 @@ static void update_bitmap_score(struct queue_entry *q)
             if (!q->trace_mini)
             {
                 q->trace_mini = ck_alloc(MAP_SIZE >> 3);
-                minimize_bits(q->trace_mini, trace_bits);
+                minimize_bits(q->trace_mini, trace_bits); //将trace_bits经过minimize_bits压缩，存放在trace_mini中
             }
 
             score_changed = 1;
@@ -1403,7 +1403,7 @@ static void cull_queue(void)
 
     /* Let's see if anything in the bitmap isn't captured in temp_v.
        If yes, and if it has a top_rated[] contender, let's use it. */
-    //将i从0到MAP_SIZE迭代，这个迭代其实就是筛选出一组queue entry，它们就能够覆盖到所有现在已经覆盖到的路径，而且这个case集合里的case要更小更快，这并不是最优算法，只能算是贪婪算法
+    //将i从0到MAP_SIZE迭代，这个迭代其实就是筛选出一组queue entry，它们就能够覆盖到所有现在已经覆盖到的路径（猜测这里是覆盖当前所有的tuple状态），而且这个case集合里的case要更小更快，这并不是最优算法，只能算是贪婪算法
     //依次遍历bitmap中的每个byte
     for (i = 0; i < MAP_SIZE; i++)
         //判断每个byte的top_rated是否存在,该byte对应的temp_v是否被置为1
@@ -1418,8 +1418,8 @@ static void cull_queue(void)
             //从temp_v中，移除所有属于当前current-entry的byte，也就是这个testcase触发了多少path就给tempv标记上
             //就从temp_v中清除掉所有top_rated[i]覆盖到的path，将对应的bit置为0
             while (j--)
-                if (top_rated[i]->trace_mini[j])
-                    temp_v[j] &= ~top_rated[i]->trace_mini[j];
+                if (top_rated[i]->trace_mini[j])               // trace_mini：only record path coverage, ignoring counts.
+                    temp_v[j] &= ~top_rated[i]->trace_mini[j]; //从temp_v中清除掉所有top_rated[i]覆盖到的path，将对应的bit设置为0
 
             top_rated[i]->favored = 1;
             queued_favored++;
