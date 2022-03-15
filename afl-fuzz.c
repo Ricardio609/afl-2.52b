@@ -1344,7 +1344,7 @@ static void update_bitmap_score(struct queue_entry *q)
             q->tc_ref++;
             //如果q->trace_mini为空，则将trace_bits经过minimize_bits压缩，然后存到trace_mini字段里
             if (!q->trace_mini)
-            {
+            { // trace_mini的大小为MAP_SIZE / 8，即每个bit对应了bit_map中的一个byte；如果这个queue访问了bit_map中的一个byte(即访问了一个edge)，trace_mini中对应的bit位就置一
                 q->trace_mini = ck_alloc(MAP_SIZE >> 3);
                 minimize_bits(q->trace_mini, trace_bits); //将trace_bits经过minimize_bits压缩，存放在trace_mini中
             }
@@ -1408,7 +1408,7 @@ static void cull_queue(void)
     for (i = 0; i < MAP_SIZE; i++)
         //判断每个byte的top_rated是否存在,该byte对应的temp_v是否被置为1
         // temp_v[i >> 3] & (1 << (i & 7))与minimize_bits()的差不多，中间的或运算改成了与，是为了检查该位是不是0，即判断该path对应的bit有没有被置位
-        //如果top_rated[i]有值，且该path在temp_v里被置位
+        //这里本质上采用了贪婪算法，如果top_rated[i]存在，且对应temp_v[]中对应bit位还没抹去，即这一轮选出的queue还没覆盖bit_map[i]对应的边，则取出这个top_rated[i]。抹去temp_v中top_rated[i]能访问到的位。
         if (top_rated[i] && (temp_v[i >> 3] & (1 << (i & 7))))
         {
 
