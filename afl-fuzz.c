@@ -943,7 +943,7 @@ static inline u8 has_new_bits(u8 *virgin_map)
         /* Optimize for (*current & *virgin) == 0 - i.e., no bits in current bitmap
            that have not been already cleared from the virgin map - since this will
            almost always be the case. */
-        //如果current不为0，且current & virgin不为0，即代表current发现了新路径或者某条路径的执行次数和之前有所不同
+        //如果current不为0(表明当前路径已hit)，且*current & *virgin不为0，即代表current发现了新路径或者某条路径的执行次数和之前有所不同
         if (unlikely(*current) && unlikely(*current & *virgin))
         {
             //如果ret当前小于2
