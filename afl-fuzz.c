@@ -258,20 +258,20 @@ struct queue_entry
         trim_done,    /* Trimmed?   该testcase是否被修建                      */
         was_fuzzed,   /* Had any fuzzing done yet?        是否已经经过fuzzing  */
         passed_det,   /* Deterministic stages passed?     */
-        has_new_cov,  /* Triggers new coverage?           */
-        var_behavior, /* Variable behavior?               */
+        has_new_cov,  /* Triggers new coverage?           当前测试用例是否触发了新的覆盖率 */
+        var_behavior, /* Variable behavior?               目标程序多次运行表现是否一致*/
         favored,      /* Currently favored?     当前是否被标记为favored（更多的fuzz机会）   */
         fs_redundant; /* Marked as redundant in the fs?   */
 
-    u32 bitmap_size, /* Number of bits set in bitmap    bitmap中bit的数量 */
-        exec_cksum;  /* Checksum of the execution trace  */
+    u32 bitmap_size, /* Number of bits set in bitmap    共享数组中非0项的个数/bitmap中bit的数量 */
+        exec_cksum;  /* Checksum of the execution trace  共享数组的哈希值*/
 
-    u64 exec_us,  /* Execution time (us)              */
+    u64 exec_us,  /* Execution time (us)              当前测试用例的执行时间（经过校准得到的平均值）*/
         handicap, /* Number of queue cycles behind    */
         depth;    /* Path depth          路径深度             */
 
-    u8 *trace_mini; /* Trace bytes, if kept       1个bit存一个byte的trace_mini      */
-    u32 tc_ref;     /* Trace bytes ref count      top_rate[]中该testcase入选的次数      */
+    u8 *trace_mini; /* Trace bytes, if kept       1个bit存一个byte的trace_mini。对当前测试用例对应共享数组的压缩版本，省略了hit count信息*/
+    u32 tc_ref;     /* Trace bytes ref count      top_rate[]中该testcase入选的次数。以该样例作为最优样例的分支点的数目 */
 
     struct queue_entry *next, /* Next element, if any      队列下一结点       */
         *next_100;            /* 100 elements ahead               */
@@ -809,7 +809,7 @@ static void mark_as_redundant(struct queue_entry *q, u8 state)
     ck_free(fn);
 }
 
-/* Append new test case to the queue. */
+/* Append new test case to the queue. 仅当一个测试样例触发了新的覆盖率/行为*/
 //将新的测试用例插入队列，并初始化fname文件名称，增加cur_depth深度++
 // queued_paths测试用例数量++，pending_not_fuzzed没被fuzzed测试用例数量++，更新last_path_time = get_cur_time()
 static void add_to_queue(u8 *fname, u32 len, u8 passed_det)
@@ -943,7 +943,7 @@ static inline u8 has_new_bits(u8 *virgin_map)
         /* Optimize for (*current & *virgin) == 0 - i.e., no bits in current bitmap
            that have not been already cleared from the virgin map - since this will
            almost always be the case. */
-        //如果current不为0(表明当前路径已hit)，且*current & *virgin不为0，即代表current发现了新路径或者某条路径的执行次数和之前有所不同
+        //如果current不为0(表明当前路径已hit)，且*current & *virgin不为0，即代表current测试用例发现了新路径或者某条路径的执行次数和之前有所不同（即在virgin中未出现过）
         if (unlikely(*current) && unlikely(*current & *virgin))
         {
             //如果ret当前小于2
@@ -977,7 +977,7 @@ static inline u8 has_new_bits(u8 *virgin_map)
 #endif /* ^__x86_64__ */
             }
 
-            *virgin &= ~*current;
+            *virgin &= ~*current;       //将表示当前执行情况的位在virgin位图中标出，下次在出现相同的执行情况时if语句将判断为false，即没有出现新的情况
         }
         // current和virgin移动到下一组8个字节，直到MAPSIZE全被遍历完
         current++;
@@ -1103,7 +1103,7 @@ static const u8 simplify_lookup[256] = {
 };
 
 #ifdef __x86_64__
-
+//该函数所做的操作是将边实际的执行次数划分为执行过和未执行过两类，如果未执行过，对应的位置为1，如果执行过，对应的位置为128
 static void simplify_trace(u64 *mem)
 {
 
@@ -1208,7 +1208,7 @@ EXP_ST void init_count_class16(void)
 }
 
 #ifdef __x86_64__
-
+//该函数的功能是把实际的执行次数进行重新计数，分到8个计数桶中，即0, 1, 2, 4, 8, 16, 32, 64, 128，0~255之间的实际执行次数最终都会被分到这8个计数桶中，从而对位图重新赋值
 static inline void classify_counts(u64 *mem)
 {
     // target是将每个分支的执行次数用1个byte来储存，而fuzzer则进一步把这个执行次数归入到buckets中，
@@ -1223,7 +1223,9 @@ static inline void classify_counts(u64 *mem)
         /* Optimize for sparse bitmaps. */
 
         if (unlikely(*mem))
-        {
+        {   
+            /*将mem拆分成四个双字节，然后分别替换为count_class_lookup16数组相应位置的值。
+            * count_class_lookup16数组在AFL初始化进程中由init_count_class16函数初始化 */
             //每次取两个字节u16 *mem16 = (u16 *) mem
             u16 *mem16 = (u16 *)mem;
             // i从0到3，计算mem16[i]的值，在count_class_lookup16[mem16[i]]里找到对应的取值，并赋值给mem16[i]
@@ -1231,6 +1233,9 @@ static inline void classify_counts(u64 *mem)
             mem16[1] = count_class_lookup16[mem16[1]];
             mem16[2] = count_class_lookup16[mem16[2]];
             mem16[3] = count_class_lookup16[mem16[3]];
+
+            /*共享内存中的单个元素大小为1字节，因此上面的操作实质上是通过双字节操作降低循环次数，最终达到的效果是
+            将每一项中存储的hit次数对齐到了2的幂，对齐结果参考count_class_lookup8[256]这一数组（数组中的每一个范围被称作一个bucket） */
         }
 
         mem++;
@@ -1303,18 +1308,21 @@ static void minimize_bits(u8 *dst, u8 *src)
    The first step of the process is to maintain a list of top_rated[] entries
    for every byte in the bitmap. We win that slot if there is no previous
    contender, or if the contender has a more favorable speed x size factor. */
+/*该算法的目的在于为每一个可能的分支点找到一个(在所有样例中兼顾较短长度和较快执行速度,并且能覆盖到该分支的样例。 */
 //每当我们发现一个新的路径，都会调用这个函数来判断其是不是更加地favorable，这个favorable的意思是说是否包含最小的路径集合来遍历到所有bitmap中的位，我们专注于这些集合而忽略其他的。
 //以上过程的第一步是为bitmap中的每个字节维护一个 top_rated[] 的列表，这里会计算究竟哪些位置是更“合适”的，该函数主要实现该过程
 static void update_bitmap_score(struct queue_entry *q)
 {
     //首先计算出这个case的fav_factor，计算方法是q->exec_us * q->len即执行时间和样例大小的乘积，以这两个指标来衡量权重,越小越优
     u32 i;
-    u64 fav_factor = q->exec_us * q->len;
+    u64 fav_factor = q->exec_us * q->len;       //该变量表明当前测试用例有多好，即更小、执行更快的测试用例
 
     /* For every byte set in trace_bits[], see if there is a previous winner,
        and how it compares to us. */
-
+    /*为了为每一个可能的分支点找到最优的样例，维护了一个top_rated数组，数组中的项和共享内存中的项一一对应，并且
+    指向对当前分支而言的最优测试样例（一个指向队列元素的指针） */
     for (i = 0; i < MAP_SIZE; i++)
+        //遍历共享内存，对每一个被本样例覆盖的分支点，比较当前样例和已有的最优样例并尝试替代它
         //遍历trace_bits数组，如果该字节的值不为0，则代表这是已经被覆盖到的path(tuple?)
         if (trace_bits[i])
         {
@@ -1337,7 +1345,8 @@ static void update_bitmap_score(struct queue_entry *q)
                     top_rated[i]->trace_mini = 0;
                 }
             }
-
+            //当最优样例不存在时，将本样例作为最优样例，同时尝试初始化一个本样例对应共享数组的压缩版本q->trace_mini，
+            //该数组是一个65536位的位图，它仅仅记录哪些分支被覆盖，而不关心hit count
             /* Insert ourselves as the new winner. */
             //设置top_rated[i]为q，即当前case，然后将其tc_ref的值加一
             top_rated[i] = q;
@@ -1358,6 +1367,7 @@ static void update_bitmap_score(struct queue_entry *q)
    previously-unseen bytes (temp_v) and marks them as favored, at least
    until the next run. The favored entries are given more air time during
    all fuzzing steps. */
+/*测试用例的选择，使用q->favored来标记一个样例是否被选中*/
 //精简队列
 //在前面讨论的关于case的 top_rated 的计算中，还有一个机制是检查所有的 top_rated[] 条目，然后
 //顺序获取之前没有遇到过的byte的对比分数低的“获胜者”进行标记，标记至少会维持到下一次运行之前。在所有的fuzz步骤中，“favorable”的条目会获得更多的执行时间
@@ -1387,10 +1397,11 @@ static void cull_queue(void)
         return;
 
     score_changed = 0;
-    //创建u8 temp_v数组，大小为MAP_SIZE除8，并将其初始值设置为0xff，其每位如果为1就代表还没有被覆盖到，如果为0就代表以及被覆盖到了
+    //创建u8 temp_v临时数组，大小为MAP_SIZE除8，并将其初始值设置为0xff，其每位如果为1就代表还没有被覆盖到，如果为0就代表以及被覆盖到了
+    //该数组实际上是一个位图，容量和共享数组一致
     memset(temp_v, 255, MAP_SIZE >> 3);
 
-    queued_favored = 0;
+    queued_favored = 0; 
     pending_favored = 0;
 
     q = queue;
@@ -1403,6 +1414,11 @@ static void cull_queue(void)
 
     /* Let's see if anything in the bitmap isn't captured in temp_v.
        If yes, and if it has a top_rated[] contender, let's use it. */
+    /*遍历共享内存，对于每个分支，选择符合下面两个条件的测试用例：
+     * 1. 存在一个最优测试用例；2. 在已设置为favored的测试用例中，没有一个能够覆盖到该分支
+     * temp_v是为了第二个条件而设置的：每找到一个符合条件的样例，对于该样例覆盖的所有分支，
+     * 我们都将temp_v的对应位置0。从而使我们可以通过简单的判断验证一个分支是否满足第二个条件
+     */
     //将i从0到MAP_SIZE迭代，这个迭代其实就是筛选出一组queue entry，它们就能够覆盖到所有现在已经覆盖到的路径（猜测这里是覆盖当前所有的tuple状态），而且这个case集合里的case要更小更快，这并不是最优算法，只能算是贪婪算法
     //依次遍历bitmap中的每个byte
     for (i = 0; i < MAP_SIZE; i++)
@@ -1429,7 +1445,7 @@ static void cull_queue(void)
         }
 
     q = queue;
-    //遍历queue队列
+    //遍历queue队列，淘汰未被选中的样例
     while (q)
     {
         //将queue中冗余的testcase进行标记;如果不是favored的case，就被标记成redundant_edges
@@ -2636,7 +2652,7 @@ static u8 run_target(char **argv, u32 timeout)
 
     prev_timed_out = child_timed_out;
 
-    /* Report outcome to caller. */
+    /* Report outcome to caller. 结果分为三类：正常，超时以及崩溃*/
     // WIFSIGNALED(status)若为异常结束子进程返回的状态，则为真
     if (WIFSIGNALED(status) && !stop_soon)
     {
@@ -2791,8 +2807,8 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
     //计算has_new_bits的值，赋值给new_bits
 
     //拷贝trace_bits到first_trace
-    if (q->exec_cksum)
-        memcpy(first_trace, trace_bits, MAP_SIZE);
+    if (q->exec_cksum)      //q->exec_cksum中存有本次测试得到的路径覆盖信息的哈希值
+        memcpy(first_trace, trace_bits, MAP_SIZE);  
     //获取开始时间start_us
     start_us = get_cur_time_us();
 
@@ -2801,7 +2817,7 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
     //猜测：对同一个初始testcase多次运行的意义可能是，觉得有些targetApp执行同一个testcase可能也会出现不同的路径
     for (stage_cur = 0; stage_cur < stage_max; stage_cur++)
     {
-
+        /* 1. 进行测试，然后计算路径覆盖信息的哈希值 */
         u32 cksum;
         //如果这个queue不是来自input文件夹，而是评估新case，且第一轮calibration stage执行结束
         //时，刷新一次展示界面show_stats，用来展示这次执行的结果，此后不再展示
@@ -2824,7 +2840,8 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
             fault = FAULT_NOINST;
             goto abort_calibration;
         }
-
+        /*2. 再次测试得到的哈希与原哈希不同，说明覆盖率信息发生了变化，取两次测试中表现最好的一次（has_new_bits返回值）。
+        同时在一个统计数组var_bytes保存覆盖率发生变化的位置。*/
         cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST); //校验此次运行的trace_bits，检查是否出现新的情况
         //先用cksum也就是本次运行的出现trace_bits哈希和本次testcase q->exec_cksum对比
         //如果发现不同，则调用has_new_bits函数和我们的总表virgin_bits对比
@@ -2874,16 +2891,16 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
     /* OK, let's collect some stats about the performance of this test case.
        This is used for fuzzing air time calculations in calculate_score(). */
 
-    q->exec_us = (stop_us - start_us) / stage_max; //执行时间延迟，计算出单次执行时间的平均值保存到q->exec_us里
-    q->bitmap_size = count_bytes(trace_bits);      // bitmap大小，将最后一次执行所覆盖到的路径数保存到q->bitmap_size里    命中的边的次数
-    q->handicap = handicap;                        //种子执行了几轮
+    q->exec_us = (stop_us - start_us) / stage_max; //执行时间延迟，通过循环花费的时间和循环的次数来计算该测试样例平均测试一次所花费的时间，结果保存到q->exec_us
+    q->bitmap_size = count_bytes(trace_bits);      // bitmap大小，将最后一次执行所覆盖到的路径数保存到q->bitmap_size里    覆盖元组的个数
+    q->handicap = handicap;                        //种子执行了几轮。该变量描述了我们在fuzz过程中有多晚发现这个样例，发现的较晚的样例在后面的测试中可能会被运行执行的久一点
     q->cal_failed = 0;                             //校准错误,总校验数
 
     total_bitmap_size += q->bitmap_size; // total_bitmap_size里加上这个queue所覆盖到的路径数
     total_bitmap_entries++;
     // 对这个测试用例的每一个byte进行排序，用一个top_rate[]来维护它的最佳入口
     // 更新q的分数（更新优先选择队列）
-    update_bitmap_score(q);
+    update_bitmap_score(q);     //对测试用例评分
 
     /* If this case didn't result in new output from the instrumentation, tell
        parent. This is a non-critical problem, but something to warn the user
@@ -2903,6 +2920,7 @@ abort_calibration:
     }
 
     /* Mark variable paths. */
+    /*如果在多次运行的过程中发现覆盖率有变化，那么将q->var_behavior置位，更新计数器 */
     //如果这个queue是可变路径，即var_detected为1，则计算var_bytes里被置位的tuple个数，保存到var_byte_count里，代表这些tuple具有可变的行为
     if (var_detected)
     {
@@ -5488,12 +5506,12 @@ static u8 fuzz_one(char **argv)
 
     subseq_tmouts = 0;
 
-    cur_depth = queue_cur->depth;
+    cur_depth = queue_cur->depth;       //从初始样例到当前样例发生变异的次数
 
     /*******************************************
      * CALIBRATION (only if failed earlier on) *
      *******************************************/
-    //假如当前项有校准错误，并且校准错误次数小于3次，那么就用calibrate_case进行测试
+    //假如当前项有校准错误，并且校准错误次数小于3次，那么就用calibrate_case重新校准
     if (queue_cur->cal_failed)
     {
 
@@ -5521,7 +5539,9 @@ static u8 fuzz_one(char **argv)
     //如果测试用例没有修剪过，那么调用函数trim_case对测试用例进行修剪  对种子大小进行修剪
     if (!dumb_mode && !queue_cur->trim_done)
     {
-
+        /*该函数的作用是尝试从当前样例中切除一部分，使用剩下的内容进行测试，
+        如果测试的结果显示覆盖率完全没有变化，那么可以认为被切掉的部分可有可无。最后我们得到一个原本样例的精简版，将其放入out_buf
+        */
         u8 res = trim_case(argv, queue_cur, in_buf);
 
         if (res == FAULT_ERROR)
@@ -8824,6 +8844,8 @@ int main(int argc, char **argv)
         u8 skipped_fuzz;
         //更新队列
         cull_queue(); // 对queue进行筛选;精简队列
+        /*每一轮测试队列中的一个文件，但取决于测试样例的详细信息，我们也可能会跳过该文件，
+        此处的代码相当于循环遍历待测队列，从而保证每个样例都有可能被执行到*/
         //如果queue_cur为空，代表所有queue都被执行完一轮
         if (!queue_cur)
         { //判断queue_cur队列是否为空，如果是，则表示已经完成对队列的遍历（所有queue都被执行完一轮），初始化相关参数，重新开始遍历队列
