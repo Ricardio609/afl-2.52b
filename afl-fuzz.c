@@ -270,7 +270,7 @@ struct queue_entry
         handicap, /* Number of queue cycles behind    */
         depth;    /* Path depth          路径深度             */
 
-    u8 *trace_mini; /* Trace bytes, if kept       1个bit存一个byte的trace_mini。对当前测试用例对应共享数组的压缩版本，省略了hit count信息*/
+    u8 *trace_mini; /* Trace bytes, if kept       1个bit存一个byte的trace_bits。对当前测试用例对应共享数组的压缩版本，省略了hit count信息*/
     u32 tc_ref;     /* Trace bytes ref count      top_rate[]中该testcase入选的次数。以该样例作为最优样例的分支点的数目 */
 
     struct queue_entry *next, /* Next element, if any      队列下一结点       */
@@ -282,6 +282,9 @@ static struct queue_entry *queue, /* Fuzzing queue (linked list)      */
     *queue_top,                   /* Top of the list                  */
     *q_prev100;                   /* Previous 100 marker              */
 
+//一条边可能被多个testcase执行，而这些testcase的长度和运行时间基本是不同的。
+//top_rated[index]表示在众多执行了edge-index的testcase中、长度*运行时间最短的那个testcase（我们称这个testcase更favored的）
+//top_rated数组的索引和trace_bits数组的索引所代表的含义是一致的，都代表边
 static struct queue_entry *
     top_rated[MAP_SIZE]; /* Top entries for bitmap bytes     */
 
@@ -943,6 +946,7 @@ static inline u8 has_new_bits(u8 *virgin_map)
         /* Optimize for (*current & *virgin) == 0 - i.e., no bits in current bitmap
            that have not been already cleared from the virgin map - since this will
            almost always be the case. */
+        //使用unlikely()说明执行else的可能性大 使用likely()说明执行if的可能性大，目的是提高系统的运行速度
         //如果current不为0(表明当前路径已hit)，且*current & *virgin不为0，即代表current测试用例发现了新路径或者某条路径的执行次数和之前有所不同（即在virgin中未出现过）
         if (unlikely(*current) && unlikely(*current & *virgin))
         {
@@ -957,6 +961,7 @@ static inline u8 has_new_bits(u8 *virgin_map)
                    bytes in current[] are pristine in virgin[]. */
                 // i的范围是0-7，比较cur[i] && vir[i] == 0xff，如果有一个为真，则设置ret为2
 #ifdef __x86_64__
+                //64位中cur和vir的任何对应一位若都为FF 则返回2 否则返回1
                 //注意==的优先级比&&要高，所以先判断vir[i]是否是0xff，即之前从未被覆盖到，然后再和cur[i]进行逻辑与
                 if ((cur[0] && vir[0] == 0xff) || (cur[1] && vir[1] == 0xff) ||
                     (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff) ||
@@ -967,7 +972,7 @@ static inline u8 has_new_bits(u8 *virgin_map)
                     ret = 1; //这代表仅仅只是改变了某个tuple的hit-count
 
 #else
-
+                //32位中cur和vir的前四对应位若为FF 则返回2 否则返回1
                 if ((cur[0] && vir[0] == 0xff) || (cur[1] && vir[1] == 0xff) ||
                     (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff))
                     ret = 2;
@@ -1285,9 +1290,11 @@ static void remove_shm(void)
    count information here. This is called only sporadically, for some
    new paths. */
 //将trace_bits压缩为较小的位图;简单的理解就是把原本是包括了是否覆盖到和覆盖了多少次的byte，压缩成是否覆盖到的bit
+//src记录了hit count（每一条边被目前所有输入执行的次数）信息，而dst的目的是记录每条边是否被执行，没有记录hit count。所以可以将src紧凑一下，得到一个更小的bitmap：dst
+//src（也就是trace_bits）使用1bytes存储一条边的执行次数。dst（也就是q->trace_mini）则是使用1bit存储一条边是否被执行，0表示没有被执行，1表示被执行。
 static void minimize_bits(u8 *dst, u8 *src)
 {
-
+    //dst[0]的 低位 到 高位 依次表示index为[0,7]的边的执行情况。假设dst[0] = 0000 0101b，表示edge-0、edge-2被执行了
     u32 i = 0;
     //虽然dst是一个bitmap，但是实际上在这里我们还是用一个byte数组来操作它，所以就首先得做byte->bit的映射，比如说将src的前0-7个字节映射到dst的第一个字节(0-7位)
     while (i < MAP_SIZE)
@@ -1311,7 +1318,7 @@ static void minimize_bits(u8 *dst, u8 *src)
 /*该算法的目的在于为每一个可能的分支点找到一个(在所有样例中兼顾较短长度和较快执行速度,并且能覆盖到该分支的样例。 */
 //每当我们发现一个新的路径，都会调用这个函数来判断其是不是更加地favorable，这个favorable的意思是说是否包含最小的路径集合来遍历到所有bitmap中的位，我们专注于这些集合而忽略其他的。
 //以上过程的第一步是为bitmap中的每个字节维护一个 top_rated[] 的列表，这里会计算究竟哪些位置是更“合适”的，该函数主要实现该过程
-static void update_bitmap_score(struct queue_entry *q)
+static void update_bitmap_score(struct queue_entry *q)      //函数的参数是一个testcase
 {
     //首先计算出这个case的fav_factor，计算方法是q->exec_us * q->len即执行时间和样例大小的乘积，以这两个指标来衡量权重,越小越优
     u32 i;
@@ -1332,6 +1339,7 @@ static void update_bitmap_score(struct queue_entry *q)
 
                 /* Faster-executing or smaller test cases are favored. */
                 //比较执行时间和样例大小的乘积，哪个更小
+                //当前testcase不如top_rated[i]，进行下一次循环
                 if (fav_factor > top_rated[i]->exec_us * top_rated[i]->len)
                     continue;
                 // 如果top_rated[i]的更小，则代表它的更优，不做处理，继续遍历下一个路径；
@@ -1339,6 +1347,8 @@ static void update_bitmap_score(struct queue_entry *q)
                 /* Looks like we're going to win. Decrease ref count for the
                    previous winner, discard its trace_bits[] if necessary. */
                 //如果q更小，就将top_rated[i]原先对应的queue entry的tc_ref字段减一，并将其trace_mini字段置为空
+                //q->tc_ref表示 q是多少条边的favored。如果q->tc_ref==0表示top_rated[i]中，没有一个元素的值是q，afl会将q->trace_mini释放掉
+                //q->trace_mini是一个8kb的bitmap，存储的是q的覆盖信息（q所覆盖的边）
                 if (!--top_rated[i]->tc_ref)
                 {
                     ck_free(top_rated[i]->trace_mini);
@@ -1390,7 +1400,7 @@ static void cull_queue(void)
 {
 
     struct queue_entry *q;
-    static u8 temp_v[MAP_SIZE >> 3];
+    static u8 temp_v[MAP_SIZE >> 3];    //与trace_mini类似
     u32 i;
     //如果score_changed为0，即top_rated没有变化，或者dumb_mode,就直接返回
     if (dumb_mode || !score_changed)
@@ -1400,7 +1410,7 @@ static void cull_queue(void)
     //创建u8 temp_v临时数组，大小为MAP_SIZE除8，并将其初始值设置为0xff，其每位如果为1就代表还没有被覆盖到，如果为0就代表以及被覆盖到了
     //该数组实际上是一个位图，容量和共享数组一致
     memset(temp_v, 255, MAP_SIZE >> 3);
-
+    //subset元素的的数量，初始为0
     queued_favored = 0; 
     pending_favored = 0;
 
@@ -2523,16 +2533,16 @@ static u8 run_target(char **argv, u32 timeout)
                specified, stdin is /dev/null; otherwise, out_fd is cloned instead. */
             //该函数用于创建一个守护进程。在这个程序里面意思就是让该进程成为这个进程组的组长
             setsid();
-
+            //重定向fd
             dup2(dev_null_fd, 1);
             dup2(dev_null_fd, 2);
-
+            //如果fuzz文件被指定，重定向fd为标准输入
             if (out_file)
             {
 
                 dup2(dev_null_fd, 0);
             }
-            else
+            else        //否则关闭out_fd
             {
 
                 dup2(out_fd, 0);
@@ -2558,12 +2568,12 @@ static u8 run_target(char **argv, u32 timeout)
                                                                       "symbolize=0:"
                                                                       "msan_track_origins=0",
                    0);
-
+            //停止执行当前进程，用target_path应用程序替换被停止的进程，进程ID不变
             execv(target_path, argv);
 
             /* Use a distinctive bitmap value to tell the parent about execv()
                falling through. */
-
+            //使用一个独特的bitmap来通知父进程是否失败
             *(u32 *)trace_bits = EXEC_FAIL_SIG;
             exit(0);
         }
@@ -2576,7 +2586,7 @@ static u8 run_target(char **argv, u32 timeout)
 
         /* In non-dumb mode, we have the fork server up and running, so simply
            tell it to have at it, and then read back PID. */
-        // fsrv_ctl_fd 管道用于写
+        // fsrv_ctl_fd 管道用于写，prev_timed_out是跟踪超时时间
         if ((res = write(fsrv_ctl_fd, &prev_timed_out, 4)) != 4)
         {
 
@@ -2608,15 +2618,23 @@ static u8 run_target(char **argv, u32 timeout)
     //等待target执行结束，如果是dumb_mode，target执行结束的状态码将直接保存到status中，如果不是dumb_mode，则从状态管道中读取target执行结束的状态码
     if (dumb_mode == 1 || no_forkserver)
     {
-
+        /* 
+            wait()用于使父进程阻塞，直到一个子进程结束或者该进程接收到了一个指定的信号为止
+            status是一个整形指针，是该进程退出时的状态，若status不为空，则通过它可以获得子进程的结束状态。
+            child_pid>0只等待进程id等于pid的子进程，只要指定子进程没结束，就会一直等待；
+            child_pid=-1 等待任何一个子进程退出;
+            child_pid=0等待该组id等于调用进程的组id的任一子进程;
+            child_pid<-1 等待该组id等于pid的绝对值的任一子程序
+            waitpid返回0 -1是异常
+        */
         if (waitpid(child_pid, &status, 0) <= 0)
             PFATAL("waitpid() failed");
     }
-    else
+    else        //启动forkserver 获取PID
     {
 
         s32 res;
-
+        //读取子进程状态
         if ((res = read(fsrv_st_fd, &status, 4)) != 4)
         {
 
@@ -2625,7 +2643,7 @@ static u8 run_target(char **argv, u32 timeout)
             RPFATAL(res, "Unable to communicate with fork server (OOM?)");
         }
     }
-
+    
     if (!WIFSTOPPED(status))
         child_pid = 0;
 
@@ -2808,7 +2826,7 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
 
     //拷贝trace_bits到first_trace
     if (q->exec_cksum)      //q->exec_cksum中存有本次测试得到的路径覆盖信息的哈希值
-        memcpy(first_trace, trace_bits, MAP_SIZE);  
+        memcpy(first_trace, trace_bits, MAP_SIZE);      //通过当前测试用例的exec_cksum判断是否复制trace_bits数组中的值
     //获取开始时间start_us
     start_us = get_cur_time_us();
 
@@ -2826,7 +2844,7 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
         //将修改后的数据写入文件进行测试，即将从q->fname中读取的内容写入到.cur_input中
         write_to_testcase(use_mem, q->len);
         //通知forkserver可以开始fork并fuzz
-        fault = run_target(argv, use_tmout);
+        fault = run_target(argv, use_tmout);        //运行目标的返回值状态
 
         /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
            we want to bail out quickly. */
@@ -2842,13 +2860,13 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
         }
         /*2. 再次测试得到的哈希与原哈希不同，说明覆盖率信息发生了变化，取两次测试中表现最好的一次（has_new_bits返回值）。
         同时在一个统计数组var_bytes保存覆盖率发生变化的位置。*/
-        cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST); //校验此次运行的trace_bits，检查是否出现新的情况
+        cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST); //trace_bits哈希，校验此次运行的trace_bits，检查是否出现新的情况
         //先用cksum也就是本次运行的出现trace_bits哈希和本次testcase q->exec_cksum对比
         //如果发现不同，则调用has_new_bits函数和我们的总表virgin_bits对比
-        if (q->exec_cksum != cksum)
+        if (q->exec_cksum != cksum) //测试用例的exec_cksum与本次运行的cksum比较
         { //检查是否有新的覆盖状态
             //如果q->exec_cksum不等于cksum，即代表这是第一次运行，或者在相同的参数下，每次执行，cksum却不同，是一个路径可变的queue
-            u8 hnb = has_new_bits(virgin_bits);
+            u8 hnb = has_new_bits(virgin_bits);     //通过空闲区域变量来判断是否产生了新的覆盖（返回2）和新的撞击次数（返回1），没有的话返回0
             if (hnb > new_bits)
                 new_bits = hnb;
             //判断判断q->exec_cksum 是否为0，不为0那说明不是第一次执行
@@ -2864,10 +2882,10 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
 
                     //如果first_trace[i]不等于trace_bits[i]，代表发现了可变queue，且var_bytes
                     //为空，则将该字节设置为1，并将stage_max设置为CAL_CYCLES_LONG，即需要执行40次
-                    if (!var_bytes[i] && first_trace[i] != trace_bits[i])
+                    if (!var_bytes[i] && first_trace[i] != trace_bits[i])       //找出产生新覆盖的分支
                     {
 
-                        var_bytes[i] = 1;
+                        var_bytes[i] = 1;             //var_byte数组初始为0，标志着trace_bits[]从未更新
                         stage_max = CAL_CYCLES_LONG; //这里把校准次数设为40
                     }
                 }
@@ -2891,8 +2909,8 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
     /* OK, let's collect some stats about the performance of this test case.
        This is used for fuzzing air time calculations in calculate_score(). */
 
-    q->exec_us = (stop_us - start_us) / stage_max; //执行时间延迟，通过循环花费的时间和循环的次数来计算该测试样例平均测试一次所花费的时间，结果保存到q->exec_us
-    q->bitmap_size = count_bytes(trace_bits);      // bitmap大小，将最后一次执行所覆盖到的路径数保存到q->bitmap_size里    覆盖元组的个数
+    q->exec_us = (stop_us - start_us) / stage_max; //测试用例执行依次的时间。执行时间延迟，通过循环花费的时间和循环的次数来计算该测试样例平均测试一次所花费的时间，结果保存到q->exec_us
+    q->bitmap_size = count_bytes(trace_bits);      // 测试用例的bitmap大小（trace_bits数组不为0的个数），将最后一次执行所覆盖到的路径数保存到q->bitmap_size里    覆盖元组的个数
     q->handicap = handicap;                        //种子执行了几轮。该变量描述了我们在fuzz过程中有多晚发现这个样例，发现的较晚的样例在后面的测试中可能会被运行执行的久一点
     q->cal_failed = 0;                             //校准错误,总校验数
 
@@ -2912,7 +2930,7 @@ static u8 calibrate_case(char **argv, struct queue_entry *q, u8 *use_mem,
         fault = FAULT_NOBITS;
 //中断校准
 abort_calibration:
-    //是否产生新的路径
+    //是否产生新的路径。产生了新覆盖但测试用例的has_new_cov为0
     if (new_bits == 2 && !q->has_new_cov)
     {
         q->has_new_cov = 1;
@@ -8676,7 +8694,7 @@ int main(int argc, char **argv)
             crash_mode = FAULT_CRASH;
             break;
 
-        case 'n': /* dumb mode */
+        case 'n': /* dumb mode 无插桩fuzzing*/
 
             if (dumb_mode)
                 FATAL("Multiple -n options not supported");
@@ -8812,7 +8830,9 @@ int main(int argc, char **argv)
     perform_dry_run(use_argv); // afl关键函数,执行 input 文件夹下的预先准备的所有测试用例，生成初始化的 queue 和 bitmap，只对初始输入执行一次
 
     //精简队列。对初始队列进行筛选（更新favored entry）。遍历top_rated[]中的queue，然后提取出发现新edge的entry，并标记为favored，
-    //使得在下次遍历queue时，这些entry能获得更多执行fuzz的机会
+    //使得在下次遍历queue时，这些entry能获得更多执行fuzz的机会。
+    //根据top_rated设置队列中的favored标志。
+    //遍历top_rated[]条目，然后依次获取先前未见过的字节（temp_v）的获胜者，并将其标记为受青睐，至少直到下一次运行为止，在所有模糊测试步骤中，首选条目将获得更多广播时间
     cull_queue();
 
     show_init_stats(); //在处理输入目录的末尾显示快速统计信息，并添加一系列警告。一些校准的东西也在这里结束了，还有一些硬编码的常量。也许最终会清理干净。
